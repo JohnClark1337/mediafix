@@ -1,0 +1,26 @@
+services:
+  mediafix:
+    build: .
+    image: mediafix:latest
+    init: true
+    stdin_open: true
+    tty: true
+    user: "${MEDIAFIX_UID:-1000}:${MEDIAFIX_GID:-1000}"
+    volumes:
+      - "${MEDIA_ROOT:-./media}:/media"
+      - hf-cache:/home/mediafix/.cache/huggingface
+    environment:
+      MEDIA_ROOT: /media
+      NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-0}"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      HF_HOME: /home/mediafix/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  hf-cache:

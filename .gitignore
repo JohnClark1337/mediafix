@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+config.toml
+.env
+
+media/
+mediafix-scan.json
+*.cache/
+
+.DS_Store
+Thumbs.db

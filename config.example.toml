@@ -1,0 +1,28 @@
+model = "small"
+device = "cuda"
+compute_type = "float16"
+cpu_threads = 4
+beam_size = 5
+vad_filter = true
+
+sub_language = "en"
+translate = false
+sidecar_ext = ".srt"
+
+downmix_jobs = 4
+video_ext = [".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts", ".m2ts"]
+subtitle_ext = [".srt", ".ass", ".ssa", ".vtt", ".sub"]
+
+ffmpeg = "ffmpeg"
+ffprobe = "ffprobe"
+mkvmerge = "mkvmerge"
+
+enhance = 1.5
+voice = 2.0
+bitrate = "192k"
+loudness = -16.0
+loudnorm = true
+replace = false
+remux = true
+
+free_space_margin_gb = 2.0
