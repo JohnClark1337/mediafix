@@ -23,9 +23,16 @@ if docker compose version >/dev/null 2>&1; then
 elif command -v docker-compose >/dev/null 2>&1; then
     COMPOSE="docker-compose"
 else
-    die "docker compose is not available (install the compose v2 plugin)"
+    COMPOSE=""
+    warn "docker compose is not installed; using run-docker.sh instead."
+    warn "to enable compose: sudo apt-get install -y docker-compose-plugin"
 fi
-ok "$($COMPOSE version --short 2>/dev/null || echo docker-compose)"
+if [ -n "$COMPOSE" ]; then
+    ok "$($COMPOSE version --short 2>/dev/null || echo compose v1)"
+    RUN="$COMPOSE run --rm mediafix"
+else
+    RUN="./run-docker.sh"
+fi
 
 if ! docker info 2>/dev/null | grep -qi nvidia; then
     warn "the NVIDIA container runtime does not appear to be wired into docker."
@@ -52,7 +59,7 @@ fi
 say "configuring"
 MEDIA_ROOT="${MEDIA_ROOT:-/mnt/Plex/TV}"
 if [ ! -d "$MEDIA_ROOT" ]; then
-    warn "media root '$MEDIA_ROOT' does not exist; edit MEDIA_ROOT in .env before scanning."
+    warn "media root '$MEDIA_ROOT' does not exist; edit MEDIA_ROOT before scanning."
 fi
 
 if [ ! -f config.toml ]; then
@@ -62,33 +69,40 @@ else
     ok "config.toml already exists (left alone)"
 fi
 
-printf 'MEDIA_ROOT=%s\nMEDIAFIX_UID=%s\nMEDIAFIX_GID=%s\n' \
-    "$MEDIA_ROOT" "$(id -u)" "$(id -g)" > .env
-ok "wrote .env (MEDIA_ROOT=$MEDIA_ROOT, running as $(id -u):$(id -g))"
+if [ -n "$COMPOSE" ]; then
+    printf 'MEDIA_ROOT=%s\nMEDIAFIX_UID=%s\nMEDIAFIX_GID=%s\n' \
+        "$MEDIA_ROOT" "$(id -u)" "$(id -g)" > .env
+    ok "wrote .env (MEDIA_ROOT=$MEDIA_ROOT, running as $(id -u):$(id -g))"
+fi
+export MEDIA_ROOT
 
 say "building the image (this downloads CUDA/Python layers on first run)"
-$COMPOSE build
+if [ -n "$COMPOSE" ]; then
+    $COMPOSE build
+else
+    docker build -t "${MEDIAFIX_IMAGE:-mediafix:latest}" .
+fi
 ok "image built"
 
 say "verifying tools, GPU, model and a downmix roundtrip"
-if $COMPOSE run --rm mediafix check; then
+if $RUN check; then
     ok "all checks passed"
 else
     warn "some checks failed (see above). Scanning still works; only the failed part is unusable."
-    warn "re-check later with: $COMPOSE run --rm mediafix check"
+    warn "re-check later with: $RUN check"
 fi
 
 cat <<EOF
 
 $(printf '%s' "$GREEN")Ready.$(printf '%s' "$OFF")
 
-  interactive  $COMPOSE run --rm mediafix tui
-  report only  $COMPOSE run --rm mediafix scan
-  unattended   $COMPOSE run --rm mediafix apply -y --only audio
-  dry run      $COMPOSE run --rm mediafix apply --dry-run
+  interactive  MEDIA_ROOT=$MEDIA_ROOT $RUN tui
+  report only  MEDIA_ROOT=$MEDIA_ROOT $RUN scan
+  unattended   MEDIA_ROOT=$MEDIA_ROOT $RUN apply -y --only audio
+  dry run      MEDIA_ROOT=$MEDIA_ROOT $RUN apply --dry-run
 
 Default model is 'small'. For hard-to-hear dialogue try:
-  MEDIAFIX_MODEL=medium $COMPOSE run --rm mediafix tui
+  MEDIAFIX_MODEL=medium MEDIA_ROOT=$MEDIA_ROOT $RUN tui
 
 The library is mounted read-write at $MEDIA_ROOT. Keep the driver on
 570.x/580.x or a P2000 will stop being detected.

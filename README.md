@@ -31,15 +31,36 @@ python -m mediafix apply ~/Videos -y         # batch, unattended
 ## Quick start (Docker, recommended for the Ubuntu box)
 
 ```bash
-cp config.example.toml config.toml           # optional
-MEDIA_ROOT=/mnt/Plex/TV docker compose up --build
+./quickstart.sh MEDIA_ROOT=/mnt/p2/TV
 ```
 
-The library is mounted read-write. The container runs as `${MEDIAFIX_UID}:${MEDIAFIX_GID}`
-(set these to your host user's ids so files stay writable). Model weights live in
-a named `hf-cache` volume, so they are downloaded once.
+The script checks prerequisites, writes `.env` with your uid/gid so files stay
+writable, builds the image, and runs the self-check. Model weights persist in a
+`hf-cache` volume, so they download once.
 
-See `check_gpu.py`-style notes below for the P2000.
+Then:
+
+```bash
+MEDIA_ROOT=/mnt/p2/TV docker compose run --rm mediafix tui
+```
+
+### If `docker compose` is not installed
+
+Compose v2 is a separate plugin. Without it, use the compose-free runner, which
+does the same thing with plain `docker run`:
+
+```bash
+MEDIA_ROOT=/mnt/p2/TV ./run-docker.sh tui
+```
+
+`run-docker.sh` auto-detects the GPU and falls back to CPU transcription when
+the NVIDIA container runtime is absent. It builds the image on first use.
+
+To install compose v2 on Ubuntu:
+
+```bash
+sudo apt-get update && sudo apt-get install -y docker-compose-plugin
+```
 
 ## P2000 / NVIDIA notes
 
