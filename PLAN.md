@@ -7,8 +7,10 @@
 
 Two pieces already exist:
 
-- `C:\Users\jdsco\scripts\audio_downmix\` — working downmix CLI; its engine is vendored verbatim.
-- `C:\Users\jdsco\faster-whisper-p2000\` — GPU transcription stack (faster-whisper + CTranslate2 + PyAV).
+- `audio_downmix` (published as `media-downmixer`) — working downmix CLI; its engine is
+  vendored verbatim here as `audio_downmix.py`.
+- `faster-whisper-p2000` — GPU transcription stack (faster-whisper + CTranslate2 + PyAV),
+  whose audio-decode path is ported into `mediafix/audio.py`.
 
 **Goal:** one terminal app that recursively scans a media folder, lists what's missing English subtitles and/or an English stereo downmix, lets the user tick per-item actions, then runs them (sidecars + in-place downmix).
 
@@ -90,7 +92,7 @@ tests/
 ## 12. Build commands
 
 ```bash
-cd C:\Users\jdsco\scripts\mediafix
+cd /path/to/mediafix
 python -m unittest discover -s tests -v
 ```
 
