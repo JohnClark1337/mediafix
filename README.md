@@ -35,8 +35,8 @@ python -m mediafix apply ~/Videos -y         # batch, unattended
 ```
 
 The script checks prerequisites, writes `.env` with your uid/gid so files stay
-writable, builds the image, and runs the self-check. Model weights persist in a
-`hf-cache` volume, so they download once.
+writable, builds the image, and runs the self-check. Model weights persist in
+`$MEDIAFIX_HF_DIR` (default `~/.cache/mediafix/hf`), so they download once.
 
 Then:
 

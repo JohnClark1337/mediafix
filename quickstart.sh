@@ -12,7 +12,17 @@ ok()   { printf '%s  ok%s %s\n' "$GREEN" "$OFF" "$*"; }
 warn() { printf '%swarn%s %s\n' "$YELLOW" "$OFF" "$*"; }
 die()  { printf '%sfail%s %s\n' "$RED" "$OFF" "$*" >&2; exit 1; }
 
-[ "$(id -u)" -eq 0 ] && die "run this as your normal user, not root (it needs your uid for file ownership)"
+if [ "$(id -u)" -eq 0 ]; then
+    die "run this as your normal user, not root (it needs your uid for file ownership)"
+fi
+
+# Positional KEY=VALUE args override the environment.
+for arg in "$@"; do
+    case "$arg" in
+        *=*) export "${arg%%=*}=${arg#*=}"; ok "override ${arg%%=*}=${arg#*=}" ;;
+        *)   die "unexpected argument '$arg' (expected KEY=VALUE)" ;;
+    esac
+done
 
 say "checking prerequisites"
 for tool in docker git; do
@@ -70,8 +80,11 @@ else
 fi
 
 if [ -n "$COMPOSE" ]; then
-    printf 'MEDIA_ROOT=%s\nMEDIAFIX_UID=%s\nMEDIAFIX_GID=%s\n' \
-        "$MEDIA_ROOT" "$(id -u)" "$(id -g)" > .env
+    # A bind mount (not a named volume) so the host uid owns the model cache.
+    MEDIAFIX_HF_DIR="${MEDIAFIX_HF_DIR:-$HOME/.cache/mediafix/hf}"
+    mkdir -p "$MEDIAFIX_HF_DIR"
+    printf 'MEDIA_ROOT=%s\nMEDIAFIX_UID=%s\nMEDIAFIX_GID=%s\nMEDIAFIX_HF_DIR=%s\n' \
+        "$MEDIA_ROOT" "$(id -u)" "$(id -g)" "$MEDIAFIX_HF_DIR" > .env
     ok "wrote .env (MEDIA_ROOT=$MEDIA_ROOT, running as $(id -u):$(id -g))"
 fi
 export MEDIA_ROOT
@@ -100,6 +113,8 @@ $(printf '%s' "$GREEN")Ready.$(printf '%s' "$OFF")
   report only  MEDIA_ROOT=$MEDIA_ROOT $RUN scan
   unattended   MEDIA_ROOT=$MEDIA_ROOT $RUN apply -y --only audio
   dry run      MEDIA_ROOT=$MEDIA_ROOT $RUN apply --dry-run
+
+Model cache: ${MEDIAFIX_HF_DIR:-$HOME/.cache/mediafix/hf}
 
 Default model is 'small'. For hard-to-hear dialogue try:
   MEDIAFIX_MODEL=medium MEDIA_ROOT=$MEDIA_ROOT $RUN tui

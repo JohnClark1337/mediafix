@@ -8,9 +8,10 @@ services:
     user: "${MEDIAFIX_UID:-1000}:${MEDIAFIX_GID:-1000}"
     volumes:
       - "${MEDIA_ROOT:-./media}:/media"
-      - hf-cache:/home/mediafix/.cache/huggingface
+      - "${MEDIAFIX_HF_DIR:-./.hf-cache}:/home/mediafix/.cache/huggingface"
     environment:
       MEDIA_ROOT: /media
+      HOME: /tmp
       NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-0}"
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       HF_HOME: /home/mediafix/.cache/huggingface
@@ -21,6 +22,3 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-
-volumes:
-  hf-cache:

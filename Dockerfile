@@ -22,9 +22,18 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY audio_downmix.py ./
 COPY mediafix/ ./mediafix/
 
-RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin mediafix \
-    && mkdir -p /media /home/mediafix/.cache/huggingface \
-    && chown -R mediafix:mediafix /app /media /home/mediafix
+# ubuntu:24.04 (and therefore nvidia/cuda:*-ubuntu24.04) already ships an
+# "ubuntu" user at UID 1000, so APP_UID must not collide with it.
+ARG APP_UID=10001
+ARG APP_GID=10001
+
+RUN set -eux; \
+    groupadd --gid "${APP_GID}" mediafix; \
+    useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home \
+            --shell /usr/sbin/nologin mediafix; \
+    mkdir -p /media /home/mediafix/.cache/huggingface; \
+    chown -R mediafix:mediafix /app /media /home/mediafix; \
+    chmod -R a+rwX /home/mediafix/.cache
 
 USER mediafix
 
