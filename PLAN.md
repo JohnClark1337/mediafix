@@ -132,6 +132,24 @@ Found only by running the real TUI, not by unit tests:
   selection toggle and every progress update crashed.
 - `textual>=8.0` is the floor for `update_cell_at`.
 
+## Model cache path
+
+`huggingface_hub` computes `HF_TOKEN_PATH = join(HF_HOME, "token")` **at import
+time** (constants.py:250) and writes it during download. A relative or
+unwritable `HF_HOME` therefore surfaces only as
+`PermissionError: ... './hf/token'` with no clue which path failed.
+
+- `SubtitleEngine.load()` calls `_check_cache()` *before* importing
+  `faster_whisper`, so the failure is a `ModelCacheError` naming `HF_HOME`, the
+  working directory, and the host-side `chown` fix.
+- `selftest` gained a `[cache]` section that prints `HF_HOME`, `HOME`, uid, cwd,
+  and the resolved cache/token paths, then proves writability. It runs before
+  `[model]`.
+- `HF_HOME` must be absolute. It is set to `/home/mediafix/.cache/huggingface` in
+  both the Dockerfile and compose, and `/hf` in `run-docker.sh`.
+- Because constants are import-time, changing `HF_HOME` in a running process has
+  no effect; the cache tests run in a subprocess.
+
 ## ScanResult units
 
 `duration_scanned` was assigned `sum(i.size for i in result.items)`, i.e. bytes,

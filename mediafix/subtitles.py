@@ -8,6 +8,10 @@ CHUNK_SECONDS = 600
 CHUNK_OVERLAP_SECONDS = 2
 
 
+class ModelCacheError(RuntimeError):
+    """The Hugging Face model cache is unusable (bad HF_HOME or permissions)."""
+
+
 @dataclass
 class Segment:
     start: float
@@ -39,6 +43,11 @@ class SubtitleEngine:
     def load(self, progress=None):
         with self._lock:
             if self._model is None:
+                # Check the cache before importing faster_whisper, so an
+                # unusable HF_HOME is reported as such instead of surfacing
+                # later as a bare PermissionError from inside the library.
+                self._check_cache()
+
                 from faster_whisper import WhisperModel
 
                 if progress:
@@ -50,6 +59,38 @@ class SubtitleEngine:
                     cpu_threads=self.config.cpu_threads,
                 )
             return self._model
+
+    @staticmethod
+    def _check_cache() -> None:
+        """Fail early with a usable message if the model cache is unusable.
+
+        huggingface_hub derives HF_TOKEN_PATH from HF_HOME at import time and
+        writes a token file there. A relative or unwritable HF_HOME otherwise
+        surfaces as 'Permission denied' with no indication of which path failed.
+        """
+        import os
+
+        try:
+            from huggingface_hub import constants
+        except ImportError:
+            return  # older hub, or not installed yet; let the caller find out
+
+        cache = constants.HF_HOME
+        if not os.path.isabs(cache):
+            raise ModelCacheError(
+                f"HF_HOME is not an absolute path: {cache!r}. "
+                f"It resolves against the working directory {os.getcwd()!r}. "
+                f"Set an absolute HF_HOME, for example "
+                f"/home/mediafix/.cache/huggingface."
+            )
+        try:
+            os.makedirs(cache, exist_ok=True)
+        except OSError as exc:
+            raise ModelCacheError(
+                f"model cache {cache} cannot be created: {exc}. "
+                f"On the host, make the cache directory writable by your user: "
+                f"chown -R $(id -u):$(id -g) \"$MEDIAFIX_HF_DIR\""
+            ) from exc
 
     def transcribe_file(self, path, info, progress=None, cancel: threading.Event | None = None) -> list[Segment]:
         config = self.config

@@ -23,6 +23,11 @@ def _run(cmd, **kwargs):
     return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
 
 
+def _uid() -> str:
+    """Current uid, or 'n/a' on platforms without POSIX uids (Windows)."""
+    return str(os.getuid()) if hasattr(os, "getuid") else "n/a"
+
+
 def check_tools(config) -> list[str]:
     lines = []
     for tool in (config.ffmpeg, config.ffprobe):
@@ -63,7 +68,59 @@ def check_ctranslate2() -> list[str]:
     return lines
 
 
+def check_cache_writable() -> list[str]:
+    """Report the HF cache location and prove we can write into it.
+
+    faster-whisper downloads through huggingface_hub, which writes a token
+    file next to the model cache. If HF_HOME points somewhere unwritable the
+    only symptom is a bare PermissionError deep inside the library.
+    """
+    lines = []
+    home = os.environ.get("HF_HOME") or "(unset)"
+    lines.append(f"  HF_HOME={home}")
+    lines.append(f"  HOME={os.environ.get('HOME') or '(unset)'}")
+    lines.append(f"  uid={_uid()} cwd={os.getcwd()}")
+
+    try:
+        from huggingface_hub import constants
+    except ImportError:
+        lines.append("  huggingface_hub not installed yet; skipping")
+        return lines
+
+    cache = constants.HF_HOME
+    token = constants.HF_TOKEN_PATH
+    lines.append(f"  resolved cache={cache}")
+    lines.append(f"  resolved token={token}")
+
+    if not os.path.isabs(cache):
+        raise CheckFailure(
+            f"HF_HOME is relative ({cache!r}). It must be an absolute path such as "
+            f"'/home/mediafix/.cache/huggingface'. A relative path resolves against "
+            f"the working directory {os.getcwd()!r} and normally cannot be written."
+        )
+
+    try:
+        os.makedirs(cache, exist_ok=True)
+    except OSError as exc:
+        raise CheckFailure(f"cannot create {cache}: {exc}") from exc
+
+    probe = os.path.join(cache, ".write-test")
+    try:
+        with open(probe, "w", encoding="utf-8") as handle:
+            handle.write("ok")
+        os.unlink(probe)
+    except OSError as exc:
+        raise CheckFailure(
+            f"{cache} is not writable by uid {_uid()}: {exc}\n"
+            f"  fix on the host: chown -R $(id -u):$(id -g) <MEDIAFIX_HF_DIR>"
+        ) from exc
+
+    lines.append(f"  cache is writable ({cache})")
+    return lines
+
+
 def check_model(config) -> list[str]:
+    check_cache_writable()
     from mediafix.subtitles import SubtitleEngine
 
     engine = SubtitleEngine(config)
@@ -128,6 +185,7 @@ def run(config, model: bool = True, downmix: bool = True) -> int:
     sections = [
         ("tools", lambda: check_tools(config)),
         ("ctranslate2", lambda: check_ctranslate2()),
+        ("cache", lambda: check_cache_writable()),
         ("subtitles", lambda: check_srt_roundtrip()),
     ]
     if model:
