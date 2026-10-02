@@ -102,7 +102,17 @@ def check_cache_writable() -> list[str]:
     try:
         os.makedirs(cache, exist_ok=True)
     except OSError as exc:
-        raise CheckFailure(f"cannot create {cache}: {exc}") from exc
+        parent = os.path.dirname(cache.rstrip(os.sep))
+        hint = ""
+        if os.path.isdir(parent) and not os.access(parent, os.W_OK):
+            hint = (
+                f"\n  {parent} exists but is not writable by uid {_uid()}. "
+                f"If MEDIAFIX_HF_DIR is unset, compose falls back to './.hf-cache' "
+                f"and Docker creates that host directory as root. Set it explicitly:\n"
+                f"    MEDIAFIX_HF_DIR=$HOME/.cache/mediafix/hf docker-compose run ...\n"
+                f"  or remove the root-owned directory so it can be recreated by you."
+            )
+        raise CheckFailure(f"cannot create {cache}: {exc}{hint}") from exc
 
     probe = os.path.join(cache, ".write-test")
     try:

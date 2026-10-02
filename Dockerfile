@@ -7,6 +7,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    HOME=/home/mediafix \
     HF_HOME=/home/mediafix/.cache/huggingface
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -37,6 +38,12 @@ RUN set -eux; \
             --shell /usr/sbin/nologin mediafix; \
     mkdir -p /media /home/mediafix/.cache/huggingface; \
     chown -R mediafix:mediafix /app /media /home/mediafix; \
+    # compose and run-docker.sh override the runtime uid with the host user's
+    # so files written to /media keep their ownership. That uid must still be
+    # able to traverse into the cache directory, which means /home/mediafix
+    # itself needs o+x - chmodding only .cache left it unreachable and
+    # makedirs failed with Permission denied on the parent.
+    chmod a+x /home/mediafix /home/mediafix/.cache; \
     chmod -R a+rwX /home/mediafix/.cache
 
 USER mediafix

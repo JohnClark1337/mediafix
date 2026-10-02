@@ -132,6 +132,24 @@ Found only by running the real TUI, not by unit tests:
   selection toggle and every progress update crashed.
 - `textual>=8.0` is the floor for `update_cell_at`.
 
+## Model cache permissions
+
+`makedirs` failed on `/home/mediafix/.cache` even though the Dockerfile does
+`chmod -R a+rwX /home/mediafix/.cache`. Two causes, both addressed:
+
+- The chmod applied to `.cache` but **not to `/home/mediafix`**, so a runtime uid
+  other than 10001 (compose sets `${MEDIAFIX_UID:-1000}`) could not traverse into
+  it. `/home/mediafix` now gets `a+x`.
+- The Dockerfile never set `HOME`; it inherited `/` from the base image, which
+  is not writable. Now `HOME=/home/mediafix`.
+
+The bind mount is `${MEDIAFIX_HF_DIR:-./.hf-cache}`. When that variable is unset
+compose uses a relative `./.hf-cache`, and Docker creates missing bind-mount
+sources as **root**, leaving a directory the container user cannot write.
+`quickstart.sh` writes `MEDIAFIX_HF_DIR` into `.env` to avoid that; setting it by
+hand works too. If the mount is not in place, `makedirs` still has to create the
+cache and the `[cache]` check reports which parent is unwritable.
+
 ## Model cache path
 
 `huggingface_hub` computes `HF_TOKEN_PATH = join(HF_HOME, "token")` **at import
