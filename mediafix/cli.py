@@ -68,7 +68,7 @@ def _overrides(args) -> dict:
 
 
 def _resolve_paths(args) -> list[str]:
-    paths = list(args.paths)
+    paths = list(getattr(args, "paths", None) or [])
     if not paths:
         env_root = os.environ.get("MEDIA_ROOT") or "/media"
         paths = [env_root]
@@ -221,6 +221,9 @@ def main(argv=None) -> int:
     p_check.add_argument("--skip-downmix", action="store_true", help="do not run the downmix roundtrip")
 
     p_tui = sub.add_parser("tui", help="interactive terminal interface (default)")
+    # Only the path roots here: the TUI drives filtering/selection itself and
+    # defining --filter/--only/--limit would collide with those bindings.
+    p_tui.add_argument("paths", nargs="*", help="files or directories (searched recursively)")
     _add_engine_options(p_tui)
     _add_downmix_options(p_tui)
 

@@ -54,7 +54,7 @@ mediafix/
 audio_downmix.py (vendored)
 config.example.toml  Dockerfile  docker-compose.yml  requirements.txt  PLAN.md
 tests/
-  test_scan.py  test_downmix.py  test_runner.py  test_integration.py
+  test_scan.py  test_downmix.py  test_runner.py  test_integration.py  test_cli.py
 ```
 
 ## 7. Detection rules
@@ -80,7 +80,7 @@ tests/
 
 ## 10. Tests
 
-78 tests total: unit, runner, integration (real ffmpeg). All green.
+84 tests total: unit, cli, runner, integration (real ffmpeg). All green.
 
 ## 11. Known notes
 
