@@ -6,6 +6,7 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.coordinate import Coordinate
 from textual.screen import Screen
 from textual.widgets import (
     Button,
@@ -151,6 +152,9 @@ class ScanScreen(Screen):
 
 
 class SelectScreen(Screen):
+    # Column labels, in the same order as SelectScreen._cells returns values.
+    COLUMNS = ("Sel", "Sub", "Aud", "Size", "Length", "File")
+
     BINDINGS = [
         Binding("space", "toggle_row", "select"),
         Binding("s", "toggle_sub", "sub"),
@@ -167,7 +171,7 @@ class SelectScreen(Screen):
         super().__init__()
         self.mediafix = mediafix
         self.mode = FILTER_ALL
-        self.visible: list = []
+        self.shown: list = []
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -198,12 +202,12 @@ class SelectScreen(Screen):
             previous = None
 
         table.clear(columns=True)
-        table.add_columns("Sel", "Sub", "Aud", "Size", "Length", "File")
-        self.visible = scan_mod.filter_items(self.mediafix.result.items, self.mode)
-        for index, item in enumerate(self.visible):
+        table.add_columns(*self.COLUMNS)
+        self.shown = scan_mod.filter_items(self.mediafix.result.items, self.mode)
+        for index, item in enumerate(self.shown):
             table.add_row(*self._cells(item), key=str(index))
-        if self.visible:
-            table.move_cursor(row=min(max(previous or 0, 0), len(self.visible) - 1))
+        if self.shown:
+            table.move_cursor(row=min(max(previous or 0, 0), len(self.shown) - 1))
         self._update_summary()
 
     @staticmethod
@@ -222,22 +226,24 @@ class SelectScreen(Screen):
     def _refresh(self, item) -> None:
         table = self.query_one("#items", DataTable)
         try:
-            row = self.visible.index(item)
+            row = self.shown.index(item)
         except ValueError:
             return
         cells = self._cells(item)
+        # update_cell_at is coordinate-based, so it stays correct regardless of
+        # the RowKey/ColumnKey objects the table generated internally.
         for column, value in enumerate(cells):
-            table.update_cell_at_row(row, column, value)
+            table.update_cell_at(Coordinate(row, column), value)
         self._update_summary()
 
     def _update_summary(self) -> None:
         result = self.mediafix.result
-        selected = sum(1 for i in self.visible if i.selected)
-        subs = sum(1 for i in self.visible if i.selected and i.want_subtitle)
-        auds = sum(1 for i in self.visible if i.selected and i.want_audio)
+        selected = sum(1 for i in self.shown if i.selected)
+        subs = sum(1 for i in self.shown if i.selected and i.want_subtitle)
+        auds = sum(1 for i in self.shown if i.selected and i.want_audio)
         mode = "DRY RUN" if self.mediafix.dry_run else "LIVE"
         text = (
-            f"{mode} | {len(self.visible)} shown of {len(result.items)} | "
+            f"{mode} | {len(self.shown)} shown of {len(result.items)} | "
             f"{result.needs_subtitle_count} missing subs, {result.needs_audio_count} missing stereo | "
             f"selected {selected} ({subs} sub, {auds} aud)"
         )
@@ -245,12 +251,12 @@ class SelectScreen(Screen):
 
     def _current(self):
         table = self.query_one("#items", DataTable)
-        if not self.visible:
+        if not self.shown:
             return None
         row = table.cursor_row
-        if row is None or row < 0 or row >= len(self.visible):
+        if row is None or row < 0 or row >= len(self.shown):
             return None
-        return self.visible[row]
+        return self.shown[row]
 
     def action_toggle_row(self) -> None:
         item = self._current()
@@ -289,7 +295,7 @@ class SelectScreen(Screen):
         self._bulk(lambda item: "audio")
 
     def _bulk(self, field: str) -> None:
-        for item in self.visible:
+        for item in self.shown:
             if not item.selectable:
                 continue
             key = "want_subtitle" if field == "sub" else "want_audio"
@@ -333,7 +339,7 @@ class SelectScreen(Screen):
 
     @on(Button.Pressed, "#sel-invert")
     def _sel_invert(self) -> None:
-        for item in self.visible:
+        for item in self.shown:
             if not item.selectable:
                 continue
             item.selected = not item.selected
@@ -342,7 +348,7 @@ class SelectScreen(Screen):
         self._rebuild()
 
     def _set_all(self, value: bool) -> None:
-        for item in self.visible:
+        for item in self.shown:
             if not item.selectable:
                 continue
             item.selected = value
@@ -472,9 +478,9 @@ class RunScreen(Screen):
         row = self.row_of.get(id(job))
         if row is None:
             return
-        table.update_cell_at_row(row, 1, STATE_LABELS.get(state, state))
-        table.update_cell_at_row(row, 2, f"{int(progress * 100):>3}%")
-        table.update_cell_at_row(row, 4, message)
+        table.update_cell_at(Coordinate(row, 1), STATE_LABELS.get(state, state))
+        table.update_cell_at(Coordinate(row, 2), f"{int(progress * 100):>3}%")
+        table.update_cell_at(Coordinate(row, 4), message)
         if state in runner_mod.TERMINAL_STATES:
             self._log(f"{STATE_LABELS.get(state, state):<9} {job.kind:<8} {job.label}  {message}")
 

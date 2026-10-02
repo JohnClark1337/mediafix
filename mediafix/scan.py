@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -68,6 +69,7 @@ class ScanResult:
     cached: int = 0
     probed: int = 0
     duration_scanned: float = 0.0
+    total_bytes: int = 0
 
     @property
     def needs_subtitle_count(self) -> int:
@@ -247,6 +249,7 @@ class ScanCache:
 
 
 def scan(roots, config, jobs: int = 8, progress=None, use_cache: bool = True) -> ScanResult:
+    started = time.monotonic()
     paths = walk(roots, config.video_ext)
     result = ScanResult(roots=[str(r) for r in roots])
     cache = ScanCache(config.cache_path) if use_cache else None
@@ -281,7 +284,8 @@ def scan(roots, config, jobs: int = 8, progress=None, use_cache: bool = True) ->
         cache.save()
         result.cached = cache.hits
 
-    result.duration_scanned = sum(i.size for i in result.items)
+    result.duration_scanned = time.monotonic() - started
+    result.total_bytes = sum(i.size for i in result.items)
     return result
 
 

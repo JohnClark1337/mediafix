@@ -115,6 +115,28 @@ All four accept `--config`; every config key is overridable via
 - CPU-only: GPU path removed from the image, compose file, and run scripts.
 - `compose run` never rebuilds, so a `git pull` needs an explicit `compose build`
   or the old image runs. `run-docker.sh` self-heals via a `.build-hash` stamp.
+
+## Textual API and attribute-name constraints
+
+Found only by running the real TUI, not by unit tests:
+
+- Never name a widget attribute after a `DOMNode` property. `self.visible: list = []`
+  shadows `DOMNode.visible`; the annotation still assigns, and Textual's setter
+  then got a list, giving `TypeError: unhashable type: 'list'`. The filtered-row
+  list is `self.shown`.
+- `DataTable` has no `update_cell_at_row`. Use
+  `update_cell_at(Coordinate(row, col), value)`; passing string row/column keys
+  to `update_cell` raises `CellDoesNotExist`, because the table stores its own
+  `RowKey`/`ColumnKey` objects.
+- Both `SelectScreen._refresh` and `RunScreen._apply` used the bad call, so every
+  selection toggle and every progress update crashed.
+- `textual>=8.0` is the floor for `update_cell_at`.
+
+## ScanResult units
+
+`duration_scanned` was assigned `sum(i.size for i in result.items)`, i.e. bytes,
+so a 7.5 TB library reported a scan "duration" of 7579436368589. It now records
+elapsed seconds from `time.monotonic()`; byte totals live in `total_bytes`.
 - Transcribed audio is chunked at 600s with 2s overlap to bound peak memory.
 - `tui` originally lacked the `paths` positional and crashed with `AttributeError`;
   `tests/test_cli.py` now guards path parsing for every subcommand.
