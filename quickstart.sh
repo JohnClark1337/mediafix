@@ -75,6 +75,8 @@ if [ -n "$COMPOSE" ]; then
 else
     docker build -t "${MEDIAFIX_IMAGE:-mediafix:latest}" .
 fi
+# Stamp so run-docker.sh does not immediately rebuild what we just built.
+touch .build-hash
 ok "image built"
 
 say "verifying tools, ctranslate2, model and a downmix roundtrip"
@@ -83,6 +85,12 @@ if $RUN check; then
 else
     warn "some checks failed (see above). Scanning still works; only the failed part is unusable."
     warn "re-check later with: $RUN check"
+fi
+
+if [ -n "$COMPOSE" ]; then
+    REBUILD_HINT="  $COMPOSE build"
+else
+    REBUILD_HINT="  run-docker.sh rebuilds automatically when sources change."
 fi
 
 cat <<EOF
@@ -95,6 +103,9 @@ $(printf '%s' "$GREEN")Ready.$(printf '%s' "$OFF")
   dry run      MEDIA_ROOT=$MEDIA_ROOT $RUN apply --dry-run
 
 Model cache: ${MEDIAFIX_HF_DIR:-$HOME/.cache/mediafix/hf}
+
+After a git pull, rebuild once before running - 'compose run' will not do it:
+${REBUILD_HINT}
 
 Default model is 'small'. For hard-to-hear dialogue try:
   MEDIAFIX_MODEL=medium MEDIA_ROOT=$MEDIA_ROOT $RUN tui

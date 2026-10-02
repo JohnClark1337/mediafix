@@ -10,6 +10,7 @@ config.toml
 media/
 mediafix-scan.json
 *.cache/
+.build-hash
 
 .DS_Store
 Thumbs.db

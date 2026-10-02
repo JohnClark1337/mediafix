@@ -113,6 +113,8 @@ All four accept `--config`; every config key is overridable via
 - `args.remux` not present when calling `process_one` directly — derived from `args.no_remux` in wrapper.
 - Duration may come from format or streams; probe has fallback.
 - CPU-only: GPU path removed from the image, compose file, and run scripts.
+- `compose run` never rebuilds, so a `git pull` needs an explicit `compose build`
+  or the old image runs. `run-docker.sh` self-heals via a `.build-hash` stamp.
 - Transcribed audio is chunked at 600s with 2s overlap to bound peak memory.
 - `tui` originally lacked the `paths` positional and crashed with `AttributeError`;
   `tests/test_cli.py` now guards path parsing for every subcommand.

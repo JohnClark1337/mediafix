@@ -63,6 +63,20 @@ MEDIA_ROOT=/mnt/p2/TV ./run-docker.sh tui
 `run-docker.sh` runs the same container with plain `docker run` and always
 transcribes on CPU. It builds the image on first use.
 
+### After a `git pull`: rebuild first
+
+`docker compose run` and `docker-compose run` **do not rebuild**. They reuse
+whatever `mediafix:latest` already is, so pulling new code and running it will
+silently execute the old image. Rebuild explicitly:
+
+```bash
+docker-compose build          # or: docker compose build
+```
+
+`run-docker.sh` handles this itself — it compares source mtimes against a
+`.build-hash` stamp and rebuilds when they differ, so it is safe to use
+repeatedly. Force it any time with `MEDIAFIX_REBUILD=1 ./run-docker.sh tui`.
+
 To install compose v2 on Ubuntu:
 
 ```bash
