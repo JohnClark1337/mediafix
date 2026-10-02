@@ -12,13 +12,4 @@ services:
     environment:
       MEDIA_ROOT: /media
       HOME: /tmp
-      NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-0}"
-      NVIDIA_DRIVER_CAPABILITIES: compute,utility
       HF_HOME: /home/mediafix/.cache/huggingface
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]

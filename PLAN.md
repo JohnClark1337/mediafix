@@ -9,7 +9,7 @@ Two pieces already exist:
 
 - `audio_downmix` (published as `media-downmixer`) — working downmix CLI; its engine is
   vendored verbatim here as `audio_downmix.py`.
-- `faster-whisper-p2000` — GPU transcription stack (faster-whisper + CTranslate2 + PyAV),
+- `faster-whisper-p2000` — transcription stack (faster-whisper + CTranslate2 + PyAV),
   whose audio-decode path is ported into `mediafix/audio.py`.
 
 **Goal:** one terminal app that recursively scans a media folder, lists what's missing English subtitles and/or an English stereo downmix, lets the user tick per-item actions, then runs them (sidecars + in-place downmix).
@@ -18,12 +18,11 @@ Two pieces already exist:
 
 | Constraint | Detail |
 |---|---|
-| P2000 is Pascal `sm_61` | CTranslate2 includes native kernels. |
-| Driver 590+ drops Pascal | Host must run 570.x/580.x (avoid 590+). CUDA 12.8 needs ≥570.26. |
-| No cuDNN needed | Wheels built `WITH_CUDNN=OFF`. |
-| FFmpeg >= 6.0 for `dialoguenhance` | Ubuntu 24.04 ships 6.1.1. |
-| Base image | `nvidia/cuda:12.8.1-runtime-ubuntu24.04` (Python 3.12, ffmpeg 6.1.1, mkvtoolnix 82.0). |
-| CPU fallback | faster-whisper supports `device=cpu` if GPU missing. |
+| Host is Ubuntu 20.04 | GPU/driver path abandoned; CPU-only for now. |
+| No CUDA | Image uses plain `ubuntu:24.04`; no `nvidia-*` wheels, no `--gpus`. |
+| CPU inference | CTranslate2 CPU backend, `device="cpu"`, `compute_type="int8"`. |
+| FFmpeg >= 6.0 for `dialoguenhance` | Container base Ubuntu 24.04 ships 6.1.1, independent of the 20.04 host. |
+| Base image | `ubuntu:24.04` (Python 3.12, ffmpeg 6.1.1, mkvtoolnix). |
 
 ## 3. Locked decisions
 
@@ -31,13 +30,13 @@ Two pieces already exist:
 2. Sidecar `.srt` files: `<stem>.eng.srt` (or `.srt` for "en" → mapped to `eng`).
 3. "Missing subtitle" = no embedded English subtitle AND no English sidecar (`.srt`, `.en.srt`, `.eng.srt`). Other languages do not count.
 4. Downmix in place, atomically (vendor temp file + `os.replace`).
-5. Model default `small` on GPU; configurable via `--model`.
+5. Model default `small`; configurable via `--model`.
 
 ## 4. Architecture
 
 ```
 scan (ffprobe, parallel, cache) → selection TUI/apply → runner
-  ├─ subtitle worker (GPU, serial, chunked 600s)
+  ├─ subtitle worker (CPU/int8, serial, chunked 600s)
   └─ downmix pool (CPU/I/O, N parallel)
 ```
 
@@ -70,7 +69,7 @@ tests/
 - `mediafix tui` (default) — Textual UI.
 - `mediafix scan` — report, `--json`, filters `all|sub|audio|both|clean`.
 - `mediafix apply` — non-interactive, `--dry-run`, `--force`, `-y`, `--only sub|audio|both`.
-- `mediafix check` — tools, GPU, model, SRT roundtrip, downmix roundtrip.
+- `mediafix check` — tools, ctranslate2, model, SRT roundtrip, downmix roundtrip.
 
 ## 9. Safety
 
@@ -81,13 +80,13 @@ tests/
 
 ## 10. Tests
 
-75 tests total: unit, runner, integration (real ffmpeg). All green.
+78 tests total: unit, runner, integration (real ffmpeg). All green.
 
 ## 11. Known notes
 
 - `args.remux` not present when calling `process_one` directly — derived from `args.no_remux` in wrapper.
 - Duration may come from format or streams; probe has fallback.
-- GPU 590+ drops Pascal — `check` warns if compute capability looks >=9.
+- CPU-only for now: GPU path removed from the image, compose file, and run scripts.
 
 ## 12. Build commands
 
@@ -96,4 +95,4 @@ cd /path/to/mediafix
 python -m unittest discover -s tests -v
 ```
 
-On Ubuntu with Docker/NVIDIA: `docker compose up --build` to run TUI.
+On Ubuntu with Docker: `./quickstart.sh MEDIA_ROOT=/mnt/p2/TV`, then `./run-docker.sh tui`.

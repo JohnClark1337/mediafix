@@ -17,7 +17,7 @@ EXIT_USAGE = 2
 def _add_engine_options(parser) -> None:
     group = parser.add_argument_group("subtitle engine")
     group.add_argument("--model", help="whisper model name (default: small)")
-    group.add_argument("--device", choices=["cuda", "cpu"], help="inference device")
+    group.add_argument("--device", choices=["cpu", "cuda"], help="inference device (default cpu)")
     group.add_argument("--compute-type", dest="compute_type", help="ctranslate2 compute type")
     group.add_argument("--cpu-threads", dest="cpu_threads", type=int, help="cpu thread count")
     group.add_argument("--beam-size", dest="beam_size", type=int, help="beam size")
@@ -216,7 +216,7 @@ def main(argv=None) -> int:
     parser.add_argument("--config", help="path to config.toml")
     sub = parser.add_subparsers(dest="command")
 
-    p_check = sub.add_parser("check", help="verify tools, GPU and model, then run a downmix roundtrip")
+    p_check = sub.add_parser("check", help="verify tools, ctranslate2 and model, then run a downmix roundtrip")
     p_check.add_argument("--skip-model", action="store_true", help="do not load the whisper model")
     p_check.add_argument("--skip-downmix", action="store_true", help="do not run the downmix roundtrip")
 

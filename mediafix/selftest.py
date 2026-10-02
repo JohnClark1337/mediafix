@@ -50,33 +50,16 @@ def check_tools(config) -> list[str]:
     return lines
 
 
-def check_gpu() -> list[str]:
-    lines = []
-    smi = shutil.which("nvidia-smi")
-    if not smi:
-        raise CheckFailure("nvidia-smi not found; no GPU runtime detected")
-    query = _run([smi, "--query-gpu=name,driver_version,compute_cap", "--format=csv,noheader"])
-    if query.returncode != 0:
-        query = _run([smi, "--query-gpu=name,driver_version", "--format=csv,noheader"])
-    if query.returncode != 0:
-        raise CheckFailure("nvidia-smi present but query failed: " + query.stderr.strip()[:200])
-    for row in query.stdout.strip().splitlines():
-        lines.append(f"  {row.strip()}")
-        parts = [p.strip() for p in row.split(",")]
-        if len(parts) >= 3 and parts[2].isdigit() and int(parts[2].split(".")[0]) >= 9:
-            raise CheckFailure(
-                f"GPU reports compute capability {parts[2]}: NVIDIA dropped Pascal support in "
-                "the 590+ Linux driver branch. A P2000 (sm_61) needs driver 580.x or older."
-            )
-
+def check_ctranslate2() -> list[str]:
     try:
         import ctranslate2
     except ImportError as exc:
         raise CheckFailure(f"ctranslate2 unavailable: {exc}") from exc
-    count = ctranslate2.get_cuda_device_count()
-    lines.append(f"  ctranslate2 cuda devices: {count}")
-    if count < 1:
-        raise CheckFailure("ctranslate2 sees no CUDA device")
+
+    lines = [f"  ctranslate2 {ctranslate2.__version__} (cpu backend)"]
+    supported = ctranslate2.get_supported_compute_types("cpu")
+    if supported:
+        lines.append(f"  cpu compute types: {', '.join(sorted(supported))}")
     return lines
 
 
@@ -144,7 +127,7 @@ def check_downmix_roundtrip(config) -> list[str]:
 def run(config, model: bool = True, downmix: bool = True) -> int:
     sections = [
         ("tools", lambda: check_tools(config)),
-        ("gpu", lambda: check_gpu()),
+        ("ctranslate2", lambda: check_ctranslate2()),
         ("subtitles", lambda: check_srt_roundtrip()),
     ]
     if model:

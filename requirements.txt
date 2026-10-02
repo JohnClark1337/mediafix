@@ -1,5 +1,8 @@
-faster-whisper>=1.1.0,<2
+# CPU-only. CTranslate2 runs on CPU here, so no CUDA/cuDNN wheels are needed.
+# 4.4.0 is kept as a floor that is known to work on Python 3.12; pip will take
+# the newest 4.x it can use.
 ctranslate2>=4.4,<5
+faster-whisper>=1.1.0,<2
 av>=12.0
 numpy>=1.26,<3
 textual>=1.0

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# mediafix quickstart for an Ubuntu host with an NVIDIA P2000.
+# mediafix quickstart for an Ubuntu host. Transcription runs on CPU (int8).
 # Safe to re-run: every step checks before it changes anything.
 
 cd "$(dirname "$0")"
@@ -44,27 +44,7 @@ else
     RUN="./run-docker.sh"
 fi
 
-if ! docker info 2>/dev/null | grep -qi nvidia; then
-    warn "the NVIDIA container runtime does not appear to be wired into docker."
-    warn "install nvidia-container-toolkit, or expect the GPU checks in 'check' to fail."
-fi
-
-if command -v nvidia-smi >/dev/null 2>&1; then
-    GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || true)
-    DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)
-    ok "gpu: ${GPU:-unknown}  driver: ${DRIVER:-unknown}"
-    case "${DRIVER%%.*}" in
-        ""|0|1) ;;
-        *)
-            if [ "$(( ${DRIVER%%.*} ))" -ge 590 ]; then
-                warn "driver ${DRIVER} dropped Pascal support; a P2000 disappears on 590+."
-                warn "pin the 580.x branch or earlier before using the GPU."
-            fi
-            ;;
-    esac
-else
-    warn "nvidia-smi not found; the container will fall back to CPU for transcription."
-fi
+ok "transcription device: cpu (int8)"
 
 say "configuring"
 MEDIA_ROOT="${MEDIA_ROOT:-/mnt/Plex/TV}"
@@ -89,7 +69,7 @@ if [ -n "$COMPOSE" ]; then
 fi
 export MEDIA_ROOT
 
-say "building the image (this downloads CUDA/Python layers on first run)"
+say "building the image (this downloads Python layers on first run)"
 if [ -n "$COMPOSE" ]; then
     $COMPOSE build
 else
@@ -97,7 +77,7 @@ else
 fi
 ok "image built"
 
-say "verifying tools, GPU, model and a downmix roundtrip"
+say "verifying tools, ctranslate2, model and a downmix roundtrip"
 if $RUN check; then
     ok "all checks passed"
 else
@@ -119,6 +99,6 @@ Model cache: ${MEDIAFIX_HF_DIR:-$HOME/.cache/mediafix/hf}
 Default model is 'small'. For hard-to-hear dialogue try:
   MEDIAFIX_MODEL=medium MEDIA_ROOT=$MEDIA_ROOT $RUN tui
 
-The library is mounted read-write at $MEDIA_ROOT. Keep the driver on
-570.x/580.x or a P2000 will stop being detected.
+The library is mounted read-write at $MEDIA_ROOT. Transcription is CPU-only
+(int8); expect it to be slower than a GPU, especially on 'medium' or 'large-v3'.
 EOF

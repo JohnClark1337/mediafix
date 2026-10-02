@@ -8,21 +8,21 @@ Finds and repairs two things missing from a media library:
    `audio_downmix` to add a dialogue-boosted stereo track (with `dialoguenhance`
    and `loudnorm`) to surround films, rewritten in place atomically.
 
-Both pipelines run together: the GPU transcriber works while CPU/IO workers
+Both pipelines run together: the transcriber works while CPU/IO workers
 downmix in parallel.
 
 ## Requirements
 
 - FFmpeg 6.0+ (for the `dialoguenhance` filter), ffprobe, MKVToolNix.
 - Python 3.11+.
-- Optional: NVIDIA GPU (compute type `float16`) for fast transcription; falls
-  back to CPU with `--device cpu`.
+- Transcription runs on **CPU with `int8`**. No GPU, driver, or CUDA runtime is
+  needed, and none is installed in the image.
 
 ## Quick start (local)
 
 ```bash
 pip install -r requirements.txt
-python -m mediafix check                     # verify tools + GPU + model
+python -m mediafix check                     # verify tools + ctranslate2 + model
 python -m mediafix scan ~/Videos             # report only, change nothing
 python -m mediafix tui                       # interactive (default)
 python -m mediafix apply ~/Videos -y         # batch, unattended
@@ -53,8 +53,8 @@ does the same thing with plain `docker run`:
 MEDIA_ROOT=/mnt/p2/TV ./run-docker.sh tui
 ```
 
-`run-docker.sh` auto-detects the GPU and falls back to CPU transcription when
-the NVIDIA container runtime is absent. It builds the image on first use.
+`run-docker.sh` runs the same container with plain `docker run` and always
+transcribes on CPU. It builds the image on first use.
 
 To install compose v2 on Ubuntu:
 
@@ -62,15 +62,18 @@ To install compose v2 on Ubuntu:
 sudo apt-get update && sudo apt-get install -y docker-compose-plugin
 ```
 
-## P2000 / NVIDIA notes
+## Performance notes
 
-- The P2000 is Pascal (`sm_61`) and is supported by CTranslate2.
-- Keep the **Linux driver at 570.x or 580.x**. NVIDIA dropped Pascal in the 590+
-  branch; a newer driver makes the card disappear.
-- CUDA 12.8 needs driver ≥ 570.26.
-- Default compute type is `float16`; set `compute_type = "float32"` if you hit
-  numerical issues.
-- Use `small` (default) or `medium`. `large-v3` on a P2000 is very slow.
+- Transcription is CPU-only, `int8` compute type. There is no CUDA base image,
+  no `nvidia-*` pip wheels, and no `--gpus` flag in the run scripts.
+- `small` (default) is the practical ceiling. `medium` is slow; `large-v3` is
+  impractical on CPU.
+- Downmixing is unaffected: it is ffmpeg work, and runs in parallel with
+  transcription via `downmix_jobs`.
+- To trade speed for accuracy, set `compute_type = "float32"` in `config.toml`.
+- GPU support can be added back later with `device = "cuda"`, but it would need
+  a CUDA base image and `nvidia-cublas-cu12`/`nvidia-cudnn-cu12` wheels restored
+  in `requirements.txt`.
 
 ## TUI keys
 

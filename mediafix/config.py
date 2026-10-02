@@ -17,8 +17,8 @@ def _as_bool(value):
 @dataclass(frozen=True)
 class Config:
     model: str = "small"
-    device: str = "cuda"
-    compute_type: str = "float16"
+    device: str = "cpu"
+    compute_type: str = "int8"
     cpu_threads: int = 4
     beam_size: int = 5
     vad_filter: bool = True

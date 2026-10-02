@@ -1,4 +1,8 @@
-FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
+# CPU-only build: no CUDA base image and no nvidia-* pip wheels. Transcription
+# runs through CTranslate2's CPU backend (int8), so no GPU runtime is needed.
+# The base is 24.04 regardless of the host distro; ffmpeg 6.1 is required for
+# the dialoguenhance filter that audio_downmix depends on.
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -22,8 +26,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY audio_downmix.py ./
 COPY mediafix/ ./mediafix/
 
-# ubuntu:24.04 (and therefore nvidia/cuda:*-ubuntu24.04) already ships an
-# "ubuntu" user at UID 1000, so APP_UID must not collide with it.
+# ubuntu:24.04 (and anything derived from it) already ships an "ubuntu" user
+# at UID 1000, so APP_UID must not collide with it.
 ARG APP_UID=10001
 ARG APP_GID=10001
 
