@@ -163,16 +163,30 @@ def check_srt_roundtrip() -> list[str]:
     return ["  srt render + atomic write: ok"]
 
 
+def _make_clip(config, directory, channels="5.1") -> str:
+    """Generate a 2 s video+audio mkv fixture, like a real scanned file.
+
+    The downmix engine maps ``0:v`` unconditionally, so the fixture has to
+    include a video stream (a bare audio clip fails the roundtrip with
+    "Stream map '0:v' matches no streams"). ``mpeg4`` is FFmpeg's built-in
+    encoder, so this does not need libx264.
+    """
+    source = os.path.join(directory, "sample.mkv")
+    result = _run([
+        config.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "color=c=black:s=160x120:r=10",
+        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=%s" % channels,
+        "-t", "2", "-shortest",
+        "-c:v", "mpeg4", "-q:v", "5", "-c:a", "ac3", source,
+    ])
+    if result.returncode != 0:
+        raise CheckFailure("could not generate test clip: " + result.stderr.strip()[:300])
+    return source
+
+
 def check_downmix_roundtrip(config) -> list[str]:
     with tempfile.TemporaryDirectory() as tmp:
-        source = os.path.join(tmp, "sample.mkv")
-        result = _run([
-            config.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=5.1",
-            "-t", "2", "-c:a", "ac3", source,
-        ])
-        if result.returncode != 0:
-            raise CheckFailure("could not generate test clip: " + result.stderr.strip()[:300])
+        source = _make_clip(config, tmp)
 
         args = downmix_mod.build_args(config)
         _src, _base, status, message = vendor.process_one(args, source, None)
@@ -225,14 +239,7 @@ def check_censor_roundtrip(config) -> list[str]:
     from mediafix.scan import MediaItem
 
     with tempfile.TemporaryDirectory() as tmp:
-        source = os.path.join(tmp, "sample.mkv")
-        result = _run([
-            config.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
-            "-t", "2", "-c:a", "ac3", source,
-        ])
-        if result.returncode != 0:
-            raise CheckFailure("could not generate test clip: " + result.stderr.strip()[:300])
+        source = _make_clip(config, tmp, channels="stereo")
 
         sidecar = os.path.join(tmp, "sample.eng.srt")
         with open(sidecar, "w", encoding="utf-8") as handle:
