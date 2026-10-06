@@ -3,12 +3,11 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from queue import Empty, Queue
+from queue import Queue
 
+from mediafix import censor as censor_mod
 from mediafix import downmix as downmix_mod
 from mediafix import subtitles as sub_mod
-from mediafix.probe import MediaInfo
-from mediafix.scan import MediaItem
 
 JOB_QUEUED = "queued"
 JOB_RUNNING = "running"
@@ -18,18 +17,17 @@ JOB_SKIPPED = "skipped"
 JOB_CANCELLED = "cancelled"
 
 KIND_SUBTITLE = "subtitle"
+KIND_CENSOR = "censor"
 KIND_DOWNMIX = "downmix"
 
 TERMINAL_STATES = {JOB_DONE, JOB_FAILED, JOB_SKIPPED, JOB_CANCELLED}
-
-_SUCCESS = {"processed"}
 
 
 @dataclass
 class Job:
     kind: str
     path: str
-    item: MediaItem
+    item: object
     state: str = JOB_QUEUED
     message: str = ""
     progress: float = 0.0
@@ -76,6 +74,11 @@ class Runner:
         self._done = threading.Event()
         self._abort_reason: str | None = None
 
+        # path -> {"event": threading.Event, "ok": bool, "note": str}
+        self._gates: dict[str, dict] = {}
+        # path -> (success, detail) for the most recent subtitle job
+        self._sub_outcome: dict[str, tuple[bool, str]] = {}
+
     def plan(self, items) -> list[Job]:
         jobs: list[Job] = []
         for item in items:
@@ -83,6 +86,8 @@ class Runner:
                 continue
             if item.want_subtitle:
                 jobs.append(Job(KIND_SUBTITLE, item.path, item))
+            if item.want_censor:
+                jobs.append(Job(KIND_CENSOR, item.path, item))
             if item.want_audio:
                 jobs.append(Job(KIND_DOWNMIX, item.path, item))
         self.jobs = jobs
@@ -119,32 +124,143 @@ class Runner:
                     return job
         return None
 
-    def _subtitle_loop(self, engine) -> None:
-        while not self.cancel_event.is_set():
-            job = self._next_pending(KIND_SUBTITLE)
-            if job is None:
-                break
-            self._emit(job, JOB_RUNNING, "starting")
-            result = sub_mod.run_subtitle_job(
-                engine, job.item, self.config,
-                progress=lambda fraction, message, _job=job: self._emit(_job, progress=fraction, message=message),
-                cancel=self.cancel_event,
-            )
-            if result.error:
-                self._emit(job, JOB_FAILED, result.error)
-                if result.fatal:
-                    self._abort_reason = result.error
-                    self.events.put((None, "aborted", f"subtitle pipeline stopped: {result.error}", 0.0))
+    def _next_pending_cpu(self) -> Job | None:
+        """First queued subtitle or censor job, in plan order."""
+        with self._lock:
+            for job in self.jobs:
+                if job.kind in (KIND_SUBTITLE, KIND_CENSOR) and job.state == JOB_QUEUED:
+                    return job
+        return None
+
+    def _gate_record(self, path: str) -> dict:
+        with self._lock:
+            record = self._gates.get(path)
+            if record is None:
+                record = {"event": threading.Event(), "ok": False, "note": "did not run"}
+                self._gates[path] = record
+            return record
+
+    def _finish_gate(self, path: str, ok: bool, note: str) -> None:
+        record = self._gate_record(path)
+        record["ok"] = ok
+        record["note"] = note
+        record["event"].set()
+
+    def _release_gates(self) -> None:
+        with self._lock:
+            records = list(self._gates.values())
+        for record in records:
+            record["event"].set()
+
+    def _wait_for_censor(self, job: Job) -> str | None:
+        """Block until the item's censor job finishes. Returns a skip note, "cancel", or None."""
+        record = self._gates.get(job.path)
+        if record is None:
+            return None
+        event = record["event"]
+        while not event.is_set():
+            if self.cancel_event.is_set():
+                return "cancel"
+            event.wait(0.25)
+        if not record["ok"]:
+            return f"previous censor {record['note']}"
+        return None
+
+    # ------------------------------------------------------------------
+    # CPU pipeline: subtitles then censorship, strictly in plan order
+    # ------------------------------------------------------------------
+
+    def _run_subtitle(self, job: Job, engine) -> None:
+        self._emit(job, JOB_RUNNING, "starting")
+        result = sub_mod.run_subtitle_job(
+            engine, job.item, self.config,
+            progress=lambda fraction, message, _job=job: self._emit(_job, progress=fraction, message=message),
+            cancel=self.cancel_event,
+        )
+        if result.error:
+            self._emit(job, JOB_FAILED, result.error)
+            self._sub_outcome[job.path] = (False, f"failed: {result.error}")
+            if result.fatal:
+                self._abort_reason = result.error
+                self.events.put((None, "aborted", f"subtitle pipeline stopped: {result.error}", 0.0))
+            return
+        if result.cancelled:
+            self._emit(job, JOB_CANCELLED, "cancelled")
+            self._sub_outcome[job.path] = (False, "cancelled")
+            return
+        message = result.message or f"{result.segments} cues -> {os.path.basename(result.path)}"
+        self._emit(job, JOB_DONE, message)
+        self._sub_outcome[job.path] = (True, "ok")
+
+    def _run_censor(self, job: Job, engine) -> None:
+        outcome = self._sub_outcome.get(job.path)
+        if outcome is not None and not outcome[0]:
+            detail = outcome[1]
+            self._emit(job, JOB_SKIPPED, f"upstream subtitle {detail}")
+            self._finish_gate(job.path, False, f"skipped: subtitle {detail}")
+            return
+        if self.cancel_event.is_set():
+            self._emit(job, JOB_CANCELLED, "cancelled")
+            self._finish_gate(job.path, False, "cancelled")
+            return
+        self._emit(job, JOB_RUNNING, "starting")
+        result = censor_mod.run_censor_job(
+            engine, job.item, self.config,
+            progress=lambda fraction, message, _job=job: self._emit(_job, progress=fraction, message=message),
+            cancel=self.cancel_event,
+        )
+        if result.cancelled:
+            self._emit(job, JOB_CANCELLED, "cancelled")
+            self._finish_gate(job.path, False, "cancelled")
+        elif result.error:
+            self._emit(job, JOB_FAILED, result.error)
+            self._finish_gate(job.path, False, f"failed: {result.error}")
+        elif result.skipped:
+            self._emit(job, JOB_SKIPPED, result.message or "nothing to censor")
+            self._finish_gate(job.path, True, "no censored track needed")
+        else:
+            message = result.message or f"{result.segments} segment(s) muted"
+            self._emit(job, JOB_DONE, message)
+            self._finish_gate(job.path, True, "ok")
+
+    def _cpu_loop(self, engine, censor_engine) -> None:
+        try:
+            while not self.cancel_event.is_set():
+                if self._abort_reason:
                     break
-                continue
-            if result.cancelled:
-                self._emit(job, JOB_CANCELLED, "cancelled")
-            else:
-                self._emit(job, JOB_DONE, f"{result.segments} cues -> {os.path.basename(result.path)}")
+                job = self._next_pending_cpu()
+                if job is None:
+                    break
+                if job.kind == KIND_SUBTITLE:
+                    self._run_subtitle(job, engine)
+                else:
+                    self._run_censor(job, censor_engine)
+        finally:
+            self._release_gates()
+
+    def _safe_cpu(self, engine, censor_engine) -> None:
+        try:
+            self._cpu_loop(engine, censor_engine)
+        except Exception as exc:  # noqa: BLE001
+            self.events.put((None, "error",
+                             f"subtitle/censor pipeline crashed: {type(exc).__name__}: {exc}", 0.0))
+            self._release_gates()
+
+    # ------------------------------------------------------------------
+    # Downmix workers (parallel, gated on censorship)
+    # ------------------------------------------------------------------
 
     def _downmix_job(self, job: Job, args) -> None:
         if self.cancel_event.is_set():
             self._emit(job, JOB_CANCELLED, "cancelled")
+            return
+
+        blocked = self._wait_for_censor(job)
+        if blocked == "cancel":
+            self._emit(job, JOB_CANCELLED, "cancelled")
+            return
+        if blocked:
+            self._emit(job, JOB_SKIPPED, blocked)
             return
 
         shortage = downmix_mod.check_space(job.path, job.item.size, self.config.free_space_margin_gb)
@@ -170,6 +286,8 @@ class Runner:
             suffix = " [dry-run]" if self.dry_run else ""
             self._emit(job, JOB_DONE, f"{message}{suffix}")
 
+    # ------------------------------------------------------------------
+
     def run(self, on_ready=None) -> Summary:
         summary = Summary(total=len(self.jobs))
         if not self.jobs:
@@ -179,21 +297,37 @@ class Runner:
         started = time.monotonic()
         args = downmix_mod.build_args(self.config, force=self.force, dry_run=self.dry_run)
 
+        subtitle_jobs = [job for job in self.jobs if job.kind == KIND_SUBTITLE]
+        censor_jobs = [job for job in self.jobs if job.kind == KIND_CENSOR]
+
         engine = None
-        if any(job.kind == KIND_SUBTITLE for job in self.jobs):
+        if subtitle_jobs:
             from mediafix.subtitles import SubtitleEngine
 
             engine = SubtitleEngine(self.config)
             if on_ready:
                 on_ready("loading subtitle model")
 
-        subtitle_thread = None
-        if engine is not None and not self.cancel_event.is_set():
-            subtitle_thread = threading.Thread(
-                target=self._safe_subtitles, args=(engine,), daemon=True,
-                name="mediafix-subtitles",
+        # Pre-create gates so a never-started censor job blocks its downmix.
+        for job in censor_jobs:
+            self._gate_record(job.path)
+
+        censor_engine = None
+        if censor_jobs:
+            from mediafix.censor import CensorEngine
+
+            censor_engine = CensorEngine(self.config)
+            if on_ready:
+                on_ready("preparing censorship")
+
+        cpu_jobs = subtitle_jobs + censor_jobs
+        cpu_thread = None
+        if cpu_jobs and not self.cancel_event.is_set():
+            cpu_thread = threading.Thread(
+                target=self._safe_cpu, args=(engine, censor_engine), daemon=True,
+                name="mediafix-cpu",
             )
-            subtitle_thread.start()
+            cpu_thread.start()
 
         downmix_jobs = [job for job in self.jobs if job.kind == KIND_DOWNMIX]
         pool = ThreadPoolExecutor(max_workers=max(1, self.config.downmix_jobs))
@@ -204,8 +338,8 @@ class Runner:
                     future.result()
         finally:
             pool.shutdown(wait=True)
-            if subtitle_thread is not None:
-                subtitle_thread.join()
+            if cpu_thread is not None:
+                cpu_thread.join()
 
         summary.elapsed = time.monotonic() - started
         for job in self.jobs:
@@ -229,12 +363,6 @@ class Runner:
                 summary.failed += 1
                 summary.failures.append((job.kind, job.label, job.message or "did not run"))
         return summary
-
-    def _safe_subtitles(self, engine) -> None:
-        try:
-            self._subtitle_loop(engine)
-        except Exception as exc:  # noqa: BLE001
-            self.events.put((None, "error", f"subtitle pipeline crashed: {type(exc).__name__}: {exc}", 0.0))
 
     def wait(self, timeout: float | None = None) -> bool:
         return self._done.wait(timeout)

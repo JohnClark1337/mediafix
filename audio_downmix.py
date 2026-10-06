@@ -125,12 +125,13 @@ class ToolError(Exception):
 
 
 class AudioStream(object):
-    def __init__(self, pos, codec, channels, layout, language=""):
+    def __init__(self, pos, codec, channels, layout, language="", title=""):
         self.pos = pos
         self.codec = codec
         self.channels = channels
         self.layout = layout
         self.language = language
+        self.title = title
 
 
 class VideoFile(object):
@@ -244,6 +245,7 @@ def analyze_file(file_path, probe_path):
             channels=channels,
             layout=str(s.get("channel_layout") or "").strip(),
             language=str((s.get("tags") or {}).get("language") or "").strip(),
+            title=str((s.get("tags") or {}).get("title") or "").strip(),
         ))
     subtitle_codecs = [str(s.get("codec_name") or "") for s in subtitle_streams]
     return VideoFile(file_path, None, audio, subtitle_codecs)
@@ -271,8 +273,13 @@ def is_english(language):
     return lang in ("eng", "en", "english") or lang.split("-")[0] == "en"
 
 
-def has_english_stereo(vf):
-    return any(s.channels == 2 and is_english(s.language) for s in vf.audio)
+def has_english_stereo(vf, censor_prefix=None):
+    return any(
+        s.channels == 2
+        and is_english(s.language)
+        and not (censor_prefix and s.title.startswith(censor_prefix))
+        for s in vf.audio
+    )
 
 
 def format_coef(value):
@@ -294,9 +301,18 @@ def build_pan(stream):
     return "stereo|c0={}|c1={}".format(c0, c1)
 
 
-def build_command(ffmpeg, src, dst, vf, enhance, voice, bitrate, replace, loudness=None):
+def build_command(ffmpeg, src, dst, vf, enhance, voice, bitrate, replace, loudness=None,
+                  censor_prefix=None):
     ext = os.path.splitext(dst)[1].lower()
     targets = [s for s in vf.audio if needs_downmix(s)]
+
+    # When a previous censorship pass left bleeparr surround tracks behind, the
+    # stereo downmix must derive from the *censored* stream so the mutes carry
+    # through. The censored copy replaces the original as the downmix source.
+    if censor_prefix:
+        censored = [s for s in targets if s.title.startswith(censor_prefix)]
+        if censored:
+            targets = censored
 
     fc_parts = []
     labels = []
@@ -522,7 +538,7 @@ def process_one(args, src, base):
             "%s/%dch" % (s.codec or "?", s.channels) for s in vf.audio)
         return src, base, STATUS_UNCHANGED, "No surround track found ({})".format(layouts)
 
-    if has_english_stereo(vf) and not args.force:
+    if has_english_stereo(vf, censor_prefix=getattr(args, "censor_prefix", None)) and not args.force:
         return src, base, STATUS_SKIP_STEREO, "Already has an English stereo track"
 
     dst, is_temp = resolve_output_path(src, base, args.output, args.in_place)
@@ -536,6 +552,7 @@ def process_one(args, src, base):
         bitrate=args.bitrate,
         replace=args.replace,
         loudness=args.loudness if args.loudnorm else None,
+        censor_prefix=getattr(args, "censor_prefix", None),
     )
 
     remux = args.remux and os.path.splitext(dst)[1].lower() in (".mkv", ".webm")

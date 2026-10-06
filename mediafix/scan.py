@@ -17,8 +17,9 @@ FILTER_ALL = "all"
 FILTER_SUB = "sub"
 FILTER_AUDIO = "audio"
 FILTER_BOTH = "both"
+FILTER_CENSOR = "censor"
 FILTER_CLEAN = "clean"
-FILTERS = (FILTER_ALL, FILTER_SUB, FILTER_AUDIO, FILTER_BOTH, FILTER_CLEAN)
+FILTERS = (FILTER_ALL, FILTER_SUB, FILTER_AUDIO, FILTER_BOTH, FILTER_CENSOR, FILTER_CLEAN)
 
 
 @dataclass(frozen=True)
@@ -39,10 +40,12 @@ class MediaItem:
     sidecars: list = field(default_factory=list)
     needs_subtitle: bool = False
     needs_audio: bool = False
+    needs_censor: bool = False
     selectable: bool = True
     selected: bool = False
     want_subtitle: bool = False
     want_audio: bool = False
+    want_censor: bool = False
     error: str | None = None
 
     @property
@@ -55,11 +58,11 @@ class MediaItem:
 
     @property
     def needs_any(self) -> bool:
-        return self.needs_subtitle or self.needs_audio
+        return self.needs_subtitle or self.needs_audio or self.needs_censor
 
     @property
     def actionable(self) -> bool:
-        return self.selectable and (self.want_subtitle or self.want_audio)
+        return self.selectable and (self.want_subtitle or self.want_audio or self.want_censor)
 
 
 @dataclass
@@ -78,6 +81,10 @@ class ScanResult:
     @property
     def needs_audio_count(self) -> int:
         return sum(1 for i in self.items if i.needs_audio)
+
+    @property
+    def needs_censor_count(self) -> int:
+        return sum(1 for i in self.items if i.needs_censor)
 
     @property
     def both_count(self) -> int:
@@ -158,7 +165,8 @@ def find_sidecars(video_path, extensions) -> list[SidecarInfo]:
     return results
 
 
-def classify(path, info: MediaInfo, sidecars, sub_language: str) -> MediaItem:
+def classify(path, info: MediaInfo, sidecars, sub_language: str,
+             swears=None, censor_track_title: str = probe_mod.CENSOR_TRACK_TITLE) -> MediaItem:
     size = info.size
     if not size:
         try:
@@ -184,9 +192,20 @@ def classify(path, info: MediaInfo, sidecars, sub_language: str) -> MediaItem:
         return item
     item.needs_subtitle = not info.has_english_subtitle and not has_english_sidecar
     item.needs_audio = info.needs_audio
+    if swears is None:
+        item.needs_censor = False
+    elif info.has_censored_track(censor_track_title):
+        item.needs_censor = False
+    elif has_english_sidecar:
+        sidecar = next((s.path for s in sidecars if s.is_english and not s.is_forced), None)
+        sniff = swears.search_file(sidecar) if sidecar else None
+        item.needs_censor = sniff is not False
+    else:
+        item.needs_censor = True
     item.selectable = item.needs_any
     item.want_subtitle = item.needs_subtitle
     item.want_audio = item.needs_audio
+    item.want_censor = item.needs_censor
     return item
 
 
@@ -249,10 +268,13 @@ class ScanCache:
 
 
 def scan(roots, config, jobs: int = 8, progress=None, use_cache: bool = True) -> ScanResult:
+    from mediafix import censor as censor_mod
+
     started = time.monotonic()
     paths = walk(roots, config.video_ext)
     result = ScanResult(roots=[str(r) for r in roots])
     cache = ScanCache(config.cache_path) if use_cache else None
+    swear_matcher = censor_mod.load_swears(config.swears_path)
 
     def work(path: str) -> MediaItem:
         try:
@@ -269,7 +291,11 @@ def scan(roots, config, jobs: int = 8, progress=None, use_cache: bool = True) ->
             sidecars = find_sidecars(path, config.subtitle_ext)
             if cache:
                 cache.put(path, size, mtime, _encode(info, sidecars))
-        return classify(path, info, sidecars, config.sub_language)
+        return classify(
+            path, info, sidecars, config.sub_language,
+            swears=swear_matcher,
+            censor_track_title=config.censor_track_title,
+        )
 
     if paths:
         with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
@@ -296,6 +322,8 @@ def filter_items(items, mode: str) -> list[MediaItem]:
         return [i for i in items if i.needs_audio]
     if mode == FILTER_BOTH:
         return [i for i in items if i.needs_subtitle and i.needs_audio]
+    if mode == FILTER_CENSOR:
+        return [i for i in items if i.needs_censor]
     if mode == FILTER_CLEAN:
         return [i for i in items if not i.needs_any]
     return list(items)

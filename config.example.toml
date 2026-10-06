@@ -9,6 +9,24 @@ sub_language = "en"
 translate = false
 sidecar_ext = ".srt"
 
+# Search for subtitles online (subliminal) when nothing is embedded or on disk.
+subtitle_search = true
+subliminal_providers = []
+# Provider API keys, e.g. { opensubtitles.com = { username = "...", password = "..." } }
+subliminal_provider_configs = {}
+
+# Profanity censorship ("bleeparr").
+# swears_path = "C:\\path\\to\\my-swears.txt"   # default: bundled cleanvid list
+bleeptool = "S-M-FSM"
+beep = false
+beep_mode = ""
+pre_buffer_ms = 100
+post_buffer_ms = 100
+boost_db = 6
+censor_audio_langs = "eng,en,english,und"
+censor_models = ["small.en", "medium.en"]
+censor_track_title = "Censored (Bleeparr)"
+
 downmix_jobs = 4
 video_ext = [".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts", ".m2ts"]
 subtitle_ext = [".srt", ".ass", ".ssa", ".vtt", ".sub"]

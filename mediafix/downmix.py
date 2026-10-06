@@ -33,8 +33,9 @@ def build_args(config, force: bool = False, dry_run: bool = False):
         argv.append("--dry-run")
     argv.append("__placeholder__")
     args = vendor.make_parser().parse_args(argv)
-    # The vendor only derives this inside main(); process_one() reads args.remux.
+    # The vendor only derives these inside main(); process_one() reads them off args.
     args.remux = not args.no_remux
+    args.censor_prefix = config.censor_track_title
     return args
 
 

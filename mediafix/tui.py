@@ -153,14 +153,16 @@ class ScanScreen(Screen):
 
 class SelectScreen(Screen):
     # Column labels, in the same order as SelectScreen._cells returns values.
-    COLUMNS = ("Sel", "Sub", "Aud", "Size", "Length", "File")
+    COLUMNS = ("Sel", "Sub", "Aud", "Cen", "Size", "Length", "File")
 
     BINDINGS = [
         Binding("space", "toggle_row", "select"),
         Binding("s", "toggle_sub", "sub"),
         Binding("a", "toggle_audio", "audio"),
+        Binding("c", "toggle_censor", "censor"),
         Binding("S", "bulk_sub", "sub all"),
         Binding("A", "bulk_audio", "audio all"),
+        Binding("C", "bulk_censor", "censor all"),
         Binding("f", "cycle_filter", "filter"),
         Binding("r", "toggle_dry_run", "dry run"),
         Binding("enter", "start_run", "run"),
@@ -214,14 +216,15 @@ class SelectScreen(Screen):
     def _cells(item) -> tuple:
         if item.error:
             mark = "-"
-            sub = aud = "-"
+            sub = aud = cen = "-"
             length = item.error
         else:
             mark = "[x]" if item.selected else "[ ]"
             sub = "want" if item.want_subtitle else ("miss" if item.needs_subtitle else "-")
             aud = "want" if item.want_audio else ("miss" if item.needs_audio else "-")
+            cen = "want" if item.want_censor else ("miss" if item.needs_censor else "-")
             length = human_duration(item.duration)
-        return (mark, sub, aud, human_size(item.size), length, item.name)
+        return (mark, sub, aud, cen, human_size(item.size), length, item.name)
 
     def _refresh(self, item) -> None:
         table = self.query_one("#items", DataTable)
@@ -240,12 +243,15 @@ class SelectScreen(Screen):
         result = self.mediafix.result
         selected = sum(1 for i in self.shown if i.selected)
         subs = sum(1 for i in self.shown if i.selected and i.want_subtitle)
+        cens = sum(1 for i in self.shown if i.selected and i.want_censor)
         auds = sum(1 for i in self.shown if i.selected and i.want_audio)
         mode = "DRY RUN" if self.mediafix.dry_run else "LIVE"
         text = (
             f"{mode} | {len(self.shown)} shown of {len(result.items)} | "
-            f"{result.needs_subtitle_count} missing subs, {result.needs_audio_count} missing stereo | "
-            f"selected {selected} ({subs} sub, {auds} aud)"
+            f"{result.needs_subtitle_count} missing subs, "
+            f"{result.needs_audio_count} missing stereo, "
+            f"{result.needs_censor_count} with swears | "
+            f"selected {selected} ({subs} sub, {cens} cen, {auds} aud)"
         )
         self.query_one("#select-summary", Static).update(text)
 
@@ -266,8 +272,9 @@ class SelectScreen(Screen):
         if item.selected:
             item.want_subtitle = item.needs_subtitle
             item.want_audio = item.needs_audio
+            item.want_censor = item.needs_censor
         else:
-            item.want_subtitle = item.want_audio = False
+            item.want_subtitle = item.want_audio = item.want_censor = False
         self._refresh(item)
 
     def action_toggle_sub(self) -> None:
@@ -288,18 +295,31 @@ class SelectScreen(Screen):
             item.selected = True
         self._refresh(item)
 
+    def action_toggle_censor(self) -> None:
+        item = self._current()
+        if item is None or not item.selectable:
+            return
+        item.want_censor = not item.want_censor
+        if item.want_censor:
+            item.selected = True
+        self._refresh(item)
+
     def action_bulk_sub(self) -> None:
-        self._bulk(lambda item: "sub")
+        self._bulk("sub")
 
     def action_bulk_audio(self) -> None:
-        self._bulk(lambda item: "audio")
+        self._bulk("audio")
+
+    def action_bulk_censor(self) -> None:
+        self._bulk("censor")
 
     def _bulk(self, field: str) -> None:
+        key = {"sub": "want_subtitle", "audio": "want_audio", "censor": "want_censor"}[field]
+        missing_key = {"sub": "needs_subtitle", "audio": "needs_audio", "censor": "needs_censor"}[field]
         for item in self.shown:
             if not item.selectable:
                 continue
-            key = "want_subtitle" if field == "sub" else "want_audio"
-            missing = item.needs_subtitle if field == "sub" else item.needs_audio
+            missing = getattr(item, missing_key)
             setattr(item, key, missing)
             if missing:
                 item.selected = True
@@ -318,9 +338,9 @@ class SelectScreen(Screen):
         self.app.pop_screen()
 
     def action_start_run(self) -> None:
-        items = [i for i in self.mediafix.result.items if i.selected]
+        items = [i for i in self.shown if i.selected and i.actionable]
         if not items:
-            self.query_one("#select-summary", Static).update("nothing selected")
+            self.notify("nothing selected", severity="warning")
             return
         self.app.push_screen(RunScreen(self.mediafix, items))
 
@@ -345,6 +365,7 @@ class SelectScreen(Screen):
             item.selected = not item.selected
             item.want_subtitle = item.needs_subtitle and item.selected
             item.want_audio = item.needs_audio and item.selected
+            item.want_censor = item.needs_censor and item.selected
         self._rebuild()
 
     def _set_all(self, value: bool) -> None:
@@ -354,6 +375,7 @@ class SelectScreen(Screen):
             item.selected = value
             item.want_subtitle = value and item.needs_subtitle
             item.want_audio = value and item.needs_audio
+            item.want_censor = value and item.needs_censor
         self._rebuild()
 
     @on(Button.Pressed, "#sel-start")

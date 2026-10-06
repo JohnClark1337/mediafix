@@ -8,3 +8,7 @@ numpy>=1.26,<3
 # DataTable.update_cell_at(Coordinate, value) is used by the TUI; it exists
 # from textual 8.x. Lower floors would break on every selection toggle.
 textual>=8.0
+# srt powers the SRT parser; subliminal does the online subtitle search (it
+# pulls in babelfish, dogpile.cache and requests as dependencies).
+srt>=3.5,<4
+subliminal>=2.1,<3

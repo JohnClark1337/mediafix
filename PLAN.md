@@ -1,6 +1,7 @@
 # mediafix — build plan
 
-**Status:** implemented and running CPU-only. Last updated 2026-10-01.
+**Status:** implemented and running CPU-only; censorship ("bleeparr") added.
+Last updated 2026-10-06.
 For user-facing docs see [README.md](README.md); this file records the design
 decisions and the reasoning behind them.
 
@@ -57,25 +58,36 @@ the build targets CPU and the image carries no GPU code at all.
 
 ```
 scan (ffprobe, parallel, cache) → selection TUI/apply → runner
-  ├─ subtitle worker (CPU/int8, serial, chunked 600s)
-  └─ downmix pool (CPU/I/O, N parallel)
+  ├─ CPU pipeline, strictly in plan order: subtitle then censor per file
+  └─ downmix pool (CPU/I/O, N parallel), gated until censor finishes per file
 ```
+
+The CPU pipeline is a single serial thread: a subtitle job, then that file's
+censor job (Whisper models are cached and shared), then the next file that
+needs CPU work. Downmix workers wait on a per-path event before touching the
+file so they always derive stereo from the *censored* audio. Stalls before the
+censor gate are impossible: every gate is pre-created and released in a
+`finally`, and a strict-upstream skip propagates as a note to the dependent
+downmix rather than a deadlock. A fatal subtitle error aborts the remaining CPU
+pipeline (bounded memory) but never leaves the downmix pool stuck.
 
 ## 5. Reuse
 
-- `audio_downmix.py` vendored byte-identical. Reused: `probe_file`, `needs_downmix`, `is_english`, `has_english_stereo`, `process_one`, `make_parser`, `resolve_output_path`, `check_tools`, `check_filter_support`.
+- `audio_downmix.py` vendored. Reused: `probe_file`, `needs_downmix`, `is_english`, `has_english_stereo`, `process_one`, `make_parser`, `resolve_output_path`, `check_tools`, `check_filter_support`. Two small local changes keep default behavior byte-identical: `analyze_file` parses an audio stream `title` (for the censored-track prefix) and `has_english_stereo`/`build_command` accept a `censor_prefix=None` so a downmix limiter can restrict targets to censored surround tracks when one exists.
 - faster-whisper + PyAV extraction ported to `mediafix/audio.py` (16 kHz mono float32, chunked transcription).
+- Censorship ported from `davidpeele/bleeparr_CLI` into `mediafix/censor.py`, library-style: no module-level argparse, no `exit()`, scratch files under a per-job `tempfile` dir (never `clips/` next to the movie), Whisper models cached per `CensorEngine`, and every failure is a result/exception instead of a hard exit.
 
 ## 6. Module map
 
 ```
 mediafix/
   __init__.py  cli.py  config.py  probe.py  scan.py
-  srt.py  audio.py  subtitles.py  downmix.py  runner.py  tui.py  selftest.py
-audio_downmix.py (vendored)
+  srt.py  audio.py  subtitles.py  censor.py  downmix.py  runner.py  tui.py  selftest.py
+audio_downmix.py (vendored, small local patch)
 config.example.toml  Dockerfile  docker-compose.yml  requirements.txt  PLAN.md
 tests/
   test_scan.py  test_downmix.py  test_runner.py  test_integration.py  test_cli.py
+  test_censor.py  test_regressions.py  test_cache.py
 ```
 
 ## 7. Detection rules
@@ -84,6 +96,7 @@ tests/
 - ffprobe cache: JSON at `cache_path` keyed by (path,size,mtime).
 - Needs subtitle: no English embedded subtitle and no English sidecar.
 - Needs audio: has ≥6ch track and no English stereo track.
+- Needs censor: no `Censored (Bleeparr)` audio track AND (an English sidecar whose cheap regex scan finds a swear, or no English sidecar yet — a "candidate" confirmed at job time). A provably clean sidecar is skipped, marked three-state in `SwearMatcher.search_file` (True/False/None).
 
 ## 8. CLI
 
@@ -92,7 +105,13 @@ tests/
   the UI's own key bindings.
 - `mediafix scan [paths...]` — report, `--json`, `--only`, `--filter`, `--limit`.
 - `mediafix apply [paths...]` — non-interactive, `--dry-run`, `--force`, `-y`.
-- `mediafix check` — tools, ctranslate2, model, SRT roundtrip, downmix roundtrip.
+- `mediafix check` — tools, ctranslate2, model, SRT roundtrip, downmix roundtrip,
+  censorship roundtrip (`--skip-model`, `--skip-downmix`, `--skip-censor`).
+
+`--only` and the TUI add a third flag: subtitle / audio / **censor**. The censor
+roundtrip in `check` runs the full pipeline against a generated 2 s clip with a
+seeded `.eng.srt` sidecar and an injected fake Whisper model, then verifies a
+`Censored (Bleeparr)` track exists via ffprobe.
 
 All four accept `--config`; every config key is overridable via
 `MEDIAFIX_<KEY>`. Paths default to `$MEDIA_ROOT` when omitted.
@@ -106,7 +125,11 @@ All four accept `--config`; every config key is overridable via
 
 ## 10. Tests
 
-84 tests total: unit, cli, runner, integration (real ffmpeg). All green.
+154 tests total: unit, cli, runner, integration (real ffmpeg) plus a dedicated
+`test_censor.py` and censor coverage in scan/runner/cli. 12 require `textual` /
+`faster_whisper` / `huggingface_hub` and are skipped in a bare host environment
+(subliminal/`srt` gate the corresponding sections and checks). All green in the
+Ubuntu container.
 
 ## 11. Known notes
 
@@ -115,6 +138,14 @@ All four accept `--config`; every config key is overridable via
 - CPU-only: GPU path removed from the image, compose file, and run scripts.
 - `compose run` never rebuilds, so a `git pull` needs an explicit `compose build`
   or the old image runs. `run-docker.sh` self-heals via a `.build-hash` stamp.
+- The censored audio track is appended *after* the original streams so a
+  remux/downmix that drops "generated tracks" is a one-flag change: downmix
+  targets are restricted by the `Censored (Bleeparr)` title prefix instead.
+- A censor job resolves a subtitle one-off (sidecar → embedded → one-off
+  download) and never persists it, so a pure-censor run cannot scribble sidecars
+  the user did not ask for.
+- `beep_mode` defaults to `""` (no beep). `words`/`segments`/`both` only take
+  effect when `beep = true`.
 
 ## Textual API and attribute-name constraints
 

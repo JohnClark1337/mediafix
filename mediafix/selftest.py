@@ -164,8 +164,6 @@ def check_srt_roundtrip() -> list[str]:
 
 
 def check_downmix_roundtrip(config) -> list[str]:
-    if config.dry_run:
-        return ["  downmix roundtrip: skipped (dry-run)"]
     with tempfile.TemporaryDirectory() as tmp:
         source = os.path.join(tmp, "sample.mkv")
         result = _run([
@@ -191,17 +189,102 @@ def check_downmix_roundtrip(config) -> list[str]:
         return ["  downmix in-place roundtrip: ok (surround + english stereo both present)"]
 
 
-def run(config, model: bool = True, downmix: bool = True) -> int:
+def check_swears(config) -> list[str]:
+    from mediafix.censor import load_swears
+
+    matcher = load_swears(config.swears_path)
+    lines = [f"  swear list: {len(matcher.single_words)} words (+ phrases)"]
+    if not matcher.any_in("you are an asshole"):
+        raise CheckFailure("swear list matched nothing (expected 'asshole' to match)")
+    if not matcher.any_in("that was a blow job"):
+        raise CheckFailure("swear list missed the multi-word phrase 'blow job'")
+    if matcher.any_in("theshithole"):
+        raise CheckFailure("swear matching has no word boundaries (false positive)")
+    return lines
+
+
+def check_subliminal(config) -> list[str]:
+    lines = []
+    try:
+        import subliminal  # noqa: F401
+    except ImportError as exc:
+        if config.subtitle_search:
+            raise CheckFailure(f"subliminal unavailable but subtitle_search is on: {exc}") from exc
+        lines.append("  subliminal: not installed (subtitle_search is off)")
+        return lines
+    version = getattr(subliminal, "__version__", "unknown")
+    manager = getattr(subliminal, "provider_manager", None)
+    provider_names = sorted(manager.names()) if manager is not None else []
+    lines.append(f"  subliminal {version} ({len(provider_names)} providers loaded)")
+    return lines
+
+
+def check_censor_roundtrip(config) -> list[str]:
+    from mediafix.censor import CensorEngine, run_censor_job
+    from mediafix.probe import CENSOR_TRACK_TITLE, probe
+    from mediafix.scan import MediaItem
+
+    with tempfile.TemporaryDirectory() as tmp:
+        source = os.path.join(tmp, "sample.mkv")
+        result = _run([
+            config.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+            "-t", "2", "-c:a", "ac3", source,
+        ])
+        if result.returncode != 0:
+            raise CheckFailure("could not generate test clip: " + result.stderr.strip()[:300])
+
+        sidecar = os.path.join(tmp, "sample.eng.srt")
+        with open(sidecar, "w", encoding="utf-8") as handle:
+            handle.write("1\n00:00:00,300 --> 00:00:01,200\nYou are such an asshole.\n\n")
+
+        class _Word:
+            def __init__(self, text, start, end):
+                self.word = text
+                self.start = start
+                self.end = end
+
+        class _Segment:
+            def __init__(self, words):
+                self.words = words
+
+        class _FakeModel:
+            def transcribe(self, path, **kwargs):
+                return [_Segment([_Word("asshole", 0.5, 0.9)])], None
+
+        engine = CensorEngine(config)
+        engine._models["small.en"] = _FakeModel()
+        engine._models["medium.en"] = _FakeModel()
+
+        item = MediaItem(source, size=os.path.getsize(source))
+        outcome = run_censor_job(engine, item, config)
+        if not outcome.ok:
+            raise CheckFailure(f"censorship roundtrip failed: {outcome.error or outcome.message}")
+
+        info = probe(source, config.ffprobe)
+        if not info.has_censored_track(CENSOR_TRACK_TITLE):
+            raise CheckFailure("no 'Censored (Bleeparr)' audio track was added")
+        return [
+            f"  censorship roundtrip: ok ({outcome.segments} mute segment(s), "
+            f"{outcome.model_hits} whisper hit(s))"
+        ]
+
+
+def run(config, model: bool = True, downmix: bool = True, censor: bool = True) -> int:
     sections = [
         ("tools", lambda: check_tools(config)),
         ("ctranslate2", lambda: check_ctranslate2()),
         ("cache", lambda: check_cache_writable()),
         ("subtitles", lambda: check_srt_roundtrip()),
+        ("swears", lambda: check_swears(config)),
+        ("subliminal", lambda: check_subliminal(config)),
     ]
     if model:
         sections.append(("model", lambda: check_model(config)))
     if downmix:
         sections.append(("downmix", lambda: check_downmix_roundtrip(config)))
+    if censor:
+        sections.append(("censor", lambda: check_censor_roundtrip(config)))
 
     failures = 0
     for name, fn in sections:

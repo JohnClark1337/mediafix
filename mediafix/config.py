@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
 try:
@@ -41,6 +41,19 @@ class Config:
     remux: bool = True
     free_space_margin_gb: float = 2.0
     cache_path: str | None = None
+    subtitle_search: bool = True
+    subliminal_providers: tuple[str, ...] = ()
+    subliminal_provider_configs: dict = field(default_factory=dict)
+    swears_path: str | None = None
+    censor_track_title: str = "Censored (Bleeparr)"
+    censor_models: tuple[str, ...] = ("small.en", "medium.en")
+    bleeptool: str = "S-M-FSM"
+    censor_audio_langs: str = "eng,en,english,und"
+    pre_buffer_ms: int = 100
+    post_buffer_ms: int = 100
+    boost_db: int = 6
+    beep: bool = False
+    beep_mode: str = ""
 
     @property
     def sidecar_language(self) -> str:
@@ -63,7 +76,10 @@ def _coerce(name: str, raw):
     if current is None:
         if raw in {"", "none", "null"}:
             return None
-        return int(raw)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return raw
     return raw
 
 

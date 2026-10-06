@@ -9,15 +9,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mediafix import config as config_mod
 from mediafix import runner as runner_mod
+from mediafix.censor import CensorResult
 from mediafix.scan import MediaItem
 from mediafix.subtitles import SubtitleResult
 
 
-def item(path="Movie.mkv", sub=True, audio=True, selected=True, size=1024):
+def item(path="Movie.mkv", sub=True, audio=True, censor=False, selected=True, size=1024):
     return MediaItem(
         path=path, size=size, duration=60.0, needs_subtitle=sub, needs_audio=audio,
-        selectable=sub or audio, selected=selected,
+        needs_censor=censor, selectable=sub or audio or censor, selected=selected,
         want_subtitle=sub and selected, want_audio=audio and selected,
+        want_censor=censor and selected,
     )
 
 
@@ -30,6 +32,21 @@ class PlanTests(unittest.TestCase):
         self.assertEqual([j.kind for j in jobs],
                          [runner_mod.KIND_SUBTITLE, runner_mod.KIND_DOWNMIX])
         self.assertTrue(all(j.state == runner_mod.JOB_QUEUED for j in jobs))
+
+    def test_subtitle_then_censor_then_downmix(self):
+        jobs = runner_mod.Runner(self.config).plan([item(censor=True)])
+        self.assertEqual([j.kind for j in jobs],
+                         [runner_mod.KIND_SUBTITLE, runner_mod.KIND_CENSOR, runner_mod.KIND_DOWNMIX])
+
+    def test_censor_without_downmix(self):
+        jobs = runner_mod.Runner(self.config).plan([item(sub=True, audio=False, censor=True)])
+        self.assertEqual([j.kind for j in jobs],
+                         [runner_mod.KIND_SUBTITLE, runner_mod.KIND_CENSOR])
+
+    def test_subtitle_only_with_censor_needed_is_fine(self):
+        jobs = runner_mod.Runner(self.config).plan([item(audio=False, censor=True)])
+        self.assertIn(runner_mod.KIND_SUBTITLE, [j.kind for j in jobs])
+        self.assertIn(runner_mod.KIND_CENSOR, [j.kind for j in jobs])
 
     def test_only_selected_items(self):
         jobs = runner_mod.Runner(self.config).plan([item("a.mkv", selected=False)])
@@ -51,11 +68,14 @@ class RunTests(unittest.TestCase):
     def setUp(self):
         self.config = replace(config_mod.Config(), downmix_jobs=2)
 
-    def _run(self, items, sub_result=None, downmix_result=("processed", "1 track(s)")):
+    def _run(self, items, sub_result=None, downmix_result=("processed", "1 track(s)"),
+             censor_result=None):
         runner = runner_mod.Runner(self.config)
         runner.plan(items)
         sub_result = sub_result or SubtitleResult("Movie.eng.srt", 12, "en", 60.0)
+        censor_result = censor_result or CensorResult("Movie.mkv", segments=1, model_hits=1)
         with mock.patch("mediafix.subtitles.run_subtitle_job", return_value=sub_result), \
+             mock.patch("mediafix.censor.run_censor_job", return_value=censor_result), \
              mock.patch("mediafix.downmix.run_one", return_value=downmix_result), \
              mock.patch("mediafix.downmix.check_space", return_value=None):
             summary = runner.run()
@@ -70,6 +90,60 @@ class RunTests(unittest.TestCase):
         states = {j.kind: j.state for j in runner.jobs}
         self.assertEqual(states[runner_mod.KIND_SUBTITLE], runner_mod.JOB_DONE)
         self.assertEqual(states[runner_mod.KIND_DOWNMIX], runner_mod.JOB_DONE)
+
+    def test_censor_all_success(self):
+        runner, summary = self._run([item(censor=True)])
+        self.assertEqual(summary.total, 3)
+        self.assertEqual(summary.done, 3)
+        states = [j.state for j in runner.jobs]
+        self.assertEqual(states, [runner_mod.JOB_DONE] * 3)
+
+    def test_censor_skip_lets_downmix_run(self):
+        skipped = CensorResult("Movie.mkv", skipped=True, message="no profanity found")
+        runner, summary = self._run([item(sub=False, censor=True)],
+                                    censor_result=skipped)
+        self.assertEqual(summary.skipped, 1)
+        self.assertEqual(summary.done, 1)
+        states = {j.kind: j.state for j in runner.jobs}
+        self.assertEqual(states[runner_mod.KIND_CENSOR], runner_mod.JOB_SKIPPED)
+        self.assertEqual(states[runner_mod.KIND_DOWNMIX], runner_mod.JOB_DONE)
+
+    def test_censor_failure_blocks_downmix(self):
+        failed = CensorResult("Movie.mkv", error="ffmpeg out of space")
+        runner, summary = self._run([item(sub=False, censor=True, audio=True)],
+                                    censor_result=failed)
+        self.assertEqual(summary.failed, 1)
+        self.assertEqual(summary.skipped, 1)
+        states = {j.kind: j.state for j in runner.jobs}
+        self.assertEqual(states[runner_mod.KIND_CENSOR], runner_mod.JOB_FAILED)
+        self.assertEqual(states[runner_mod.KIND_DOWNMIX], runner_mod.JOB_SKIPPED)
+        downmix_note = [j.message for j in runner.jobs if j.kind == runner_mod.KIND_DOWNMIX][0]
+        self.assertIn("previous censor", downmix_note)
+
+    def test_censor_skips_when_subtitle_fails(self):
+        quiet = SubtitleResult("Movie.eng.srt", 0, "en", 0.0, error="no speech detected")
+        runner, summary = self._run([item(censor=True)], sub_result=quiet)
+        self.assertEqual(summary.failed, 1)
+        self.assertEqual(summary.skipped, 2)
+        states = {j.kind: j.state for j in runner.jobs}
+        self.assertEqual(states[runner_mod.KIND_SUBTITLE], runner_mod.JOB_FAILED)
+        self.assertEqual(states[runner_mod.KIND_CENSOR], runner_mod.JOB_SKIPPED)
+        self.assertEqual(states[runner_mod.KIND_DOWNMIX], runner_mod.JOB_SKIPPED)
+        censor_note = [j.message for j in runner.jobs if j.kind == runner_mod.KIND_CENSOR][0]
+        self.assertIn("upstream subtitle", censor_note)
+
+    def test_fatal_subtitle_aborts_censor_and_downmix(self):
+        fatal = SubtitleResult("Movie.eng.srt", 0, "en", 0.0,
+                               error="model load failed", fatal=True)
+        runner, summary = self._run([item(censor=True)], sub_result=fatal)
+        self.assertEqual(summary.failed, 1)
+        self.assertEqual(summary.skipped, 2)
+        states = {j.kind: j.state for j in runner.jobs}
+        self.assertEqual(states[runner_mod.KIND_SUBTITLE], runner_mod.JOB_FAILED)
+        self.assertEqual(states[runner_mod.KIND_CENSOR], runner_mod.JOB_SKIPPED)
+        self.assertEqual(states[runner_mod.KIND_DOWNMIX], runner_mod.JOB_SKIPPED)
+        censor_note = [j.message for j in runner.jobs if j.kind == runner_mod.KIND_CENSOR][0]
+        self.assertIn("pipeline aborted", censor_note)
 
     def test_fatal_subtitle_error_is_not_reported_as_cancelled(self):
         fatal = SubtitleResult("Movie.eng.srt", 0, "en", 0.0,

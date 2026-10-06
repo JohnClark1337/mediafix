@@ -70,5 +70,38 @@ class PathResolutionTests(unittest.TestCase):
             cli_mod._resolve_paths(ns)
 
 
+class CensorArgTests(unittest.TestCase):
+    def test_only_accepts_censor(self):
+        ns = parse_only(["scan", "--only", "censor", "."])
+        self.assertEqual(ns.only, "censor")
+
+    def test_censor_options_parse(self):
+        ns = parse_only([
+            "apply", "-y", "--only", "censor", ".",
+            "--swears", "my.txt", "--bleeptool", "M", "--beep",
+            "--beep-mode", "words", "--pre-buffer", "50", "--post-buffer", "200",
+            "--boost-db", "3", "--censor-models", "tiny.en,base.en",
+            "--no-subtitle-search", "--subliminal-providers", "opensubtitles.com,podnapisi",
+        ])
+        self.assertEqual(ns.swears_path, "my.txt")
+        self.assertEqual(ns.bleeptool, "M")
+        self.assertTrue(ns.beep)
+        self.assertEqual(ns.beep_mode, "words")
+        self.assertEqual(ns.pre_buffer_ms, 50)
+        self.assertEqual(ns.post_buffer_ms, 200)
+        self.assertEqual(ns.boost_db, 3)
+        self.assertEqual(ns.censor_models, "tiny.en,base.en")
+        self.assertFalse(ns.subtitle_search)
+        self.assertEqual(ns.subliminal_providers, ["opensubtitles.com", "podnapisi"])
+
+    def test_check_defines_skip_censor(self):
+        ns = parse_only(["check", "--skip-censor"])
+        self.assertTrue(ns.skip_censor)
+
+    def test_tui_exposes_censor_options(self):
+        ns = parse_only(["tui", "--swears", "s.txt"])
+        self.assertEqual(ns.swears_path, "s.txt")
+
+
 if __name__ == "__main__":
     unittest.main()

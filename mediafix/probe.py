@@ -13,6 +13,8 @@ import audio_downmix as vendor  # noqa: E402
 is_english = vendor.is_english
 has_english_stereo = vendor.has_english_stereo
 
+CENSOR_TRACK_TITLE = "Censored (Bleeparr)"
+
 
 @dataclass(frozen=True)
 class AudioStreamInfo:
@@ -62,7 +64,13 @@ class MediaInfo:
 
     @property
     def has_english_stereo(self) -> bool:
-        return any(s.channels == 2 and s.is_english for s in self.audio)
+        return any(
+            s.channels == 2 and s.is_english and not (s.title or "").startswith(CENSOR_TRACK_TITLE)
+            for s in self.audio
+        )
+
+    def has_censored_track(self, prefix: str = CENSOR_TRACK_TITLE) -> bool:
+        return any((s.title or "").startswith(prefix) for s in self.audio)
 
     @property
     def has_surround(self) -> bool:

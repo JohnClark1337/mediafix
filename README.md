@@ -1,16 +1,21 @@
 # mediafix
 
-Finds and repairs two things missing from a media library:
+Finds and repairs three things missing from a media library:
 
 1. **English subtitles** — transcribes the audio and writes a sidecar `.srt`
    (`<name>.eng.srt`) next to the video. Plex/Jellyfin pick these up automatically.
 2. **English stereo downmix** — reuses the proven engine from
    `audio_downmix` to add a dialogue-boosted stereo track (with `dialoguenhance`
    and `loudnorm`) to surround films, rewritten in place atomically.
+3. **Profanity censorship ("bleeparr")** — finds swear words in the subtitles,
+   refines each occurrence to per-word timestamps with Whisper, and appends a
+   `Censored (Bleeparr)` audio track that mutes them. Original streams are
+   untouched; the generated track is skipped on re-runs.
 
-Both pipelines run together: the transcriber works while CPU/IO workers downmix
-in parallel. Everything runs in Docker; nothing is installed on the host beyond
-Docker itself.
+All three pipelines run together: subtitles and censorship share the serial,
+CPU/int8 Whisper engine (subtitles first, censorship right after per file),
+while CPU/IO workers downmix in parallel. Everything runs in Docker; nothing is
+installed on the host beyond Docker itself.
 
 ## Requirements
 
@@ -120,37 +125,44 @@ The `--device` flag still accepts `cuda`; only the plumbing is gone.
 
 | Command | What it does |
 |---|---|
-| `mediafix check` | Verify tools, CTranslate2, model load, SRT roundtrip, downmix roundtrip. `--skip-model`, `--skip-downmix` to trim it. |
+| `mediafix check` | Verify tools, CTranslate2, model load, SRT/downmix/censorship roundtrips. `--skip-model`, `--skip-downmix`, `--skip-censor` to trim it. |
 | `mediafix scan [paths...]` | Report only; changes nothing. `--json` for machine output. |
 | `mediafix tui [paths...]` | Interactive Textual UI (default). |
 | `mediafix apply [paths...]` | Unattended repairs. |
 
-`scan` and `apply` take `--only sub|audio|both`, `--filter all|sub|audio|both|clean`,
-and `--limit N`. `apply` adds `--dry-run`, `--force`, and `-y`. All four accept
-`[paths...]`; when omitted, the root comes from `MEDIA_ROOT` (default `/media`
-in the container, else the current directory). `tui` deliberately omits
-`--filter`/`--only`/`--limit` because the UI drives those interactively.
+`scan` and `apply` take `--only sub|audio|censor|both`,
+`--filter all|sub|audio|both|censor|clean`, and `--limit N`. `apply` adds
+`--dry-run`, `--force`, and `-y`. All four accept `[paths...]`; when omitted, the
+root comes from `MEDIA_ROOT` (default `/media` in the container, else the current
+directory). `tui` deliberately omits `--filter`/`--only`/`--limit` because the UI
+drives those interactively.
 
 Engine flags (`--model`, `--device`, `--compute-type`, `--cpu-threads`,
-`--beam-size`, `--language`, `--translate`, `--audio-stream`, `--sidecar-ext`)
-and downmix flags (`--enhance`, `--voice`, `--bitrate`, `--loudness`,
-`--no-loudnorm`, `--replace`, `--no-remux`, `--downmix-jobs`) apply to `tui` and
-`apply`. Run `mediafix <command> --help` for the authoritative list.
+`--beam-size`, `--language`, `--translate`, `--audio-stream`, `--sidecar-ext`),
+downmix flags (`--enhance`, `--voice`, `--bitrate`, `--loudness`,
+`--no-loudnorm`, `--replace`, `--no-remux`, `--downmix-jobs`), and censorship
+flags (`--swears`, `--bleeptool`, `--beep`, `--beep-mode`, `--pre-buffer`,
+`--post-buffer`, `--boost-db`, `--censor-models`, `--no-subtitle-search`,
+`--subliminal-providers`) apply to `tui` and `apply`. Run
+`mediafix <command> --help` for the authoritative list.
 
 ## TUI keys
 
 | Key | Action |
 |---|---|
 | `space` | toggle selection of the highlighted file |
-| `s` / `a` | toggle subtitle / downmix for the file |
-| `S` / `A` | toggle subtitle / downmix for every visible file |
-| `f` | cycle filter: all / sub / audio / both / clean |
+| `s` / `a` / `c` | toggle subtitle / downmix / censorship for the file |
+| `S` / `A` / `C` | toggle subtitle / downmix / censorship for every visible file |
+| `f` | cycle filter: all / sub / audio / both / censor / clean |
 | `r` | toggle dry-run |
 | `enter` | start the run |
 | `esc` | back, or cancel a running job |
 
-While a run is in progress, `esc` or `c` cancels; a sidecar already written is
-left in place and a partially-written one is never published.
+Each file row shows a `Sub`/`Aud`/`Cen` column: `want` once picked, `miss`
+when it needs work but is not picked, `-` when it needs nothing. While a run is
+in progress, `esc` or `c` cancels; a sidecar already written is left in place,
+a partially-written one is never published, and a censored track is only ever
+swapped in after ffmpeg finishes.
 
 ## Configuration
 
@@ -174,6 +186,19 @@ A file **needs a downmix** when it has a ≥6-channel audio track and no existin
 two-channel English track. The generated track is tagged `language=eng` and
 `title=Nightmix Stereo`, so re-runs detect and skip it.
 
+A file **needs censorship** when it has no `Censored (Bleeparr)` audio track and
+an English subtitle is (or could be) dirty with swear words. If an English
+sidecar already exists it is scanned cheaply — clean files are not candidates.
+The built-in swear list ships as `mediafix/swears.txt` (from the cleanvid
+project); override it with `--swears` or `swears_path`.
+
+Censorship resolves a subtitle (sidecar, embedded stream, or a one-off download
+— never persisted), extracts an audio clip per bad section, refines each to
+per-word timestamps with the Whisper `S M FSM` passes, then mutes (or beeps)
+them on a new AAC track while every original stream is copied through. Because
+downmix input derives from the original surround track, a fresh run downmixes
+the *censored* audio only.
+
 `@eaDir`, `.Trash*`, `nightmix_output`, and dot-directories are skipped. ffprobe
 results are cached to JSON and invalidated when a file's size or mtime changes.
 
@@ -181,19 +206,33 @@ results are cached to JSON and invalidated when a file's size or mtime changes.
 
 - Sidecars are written to a temp file then `os.replace`d, so Plex never sees a
   partial `.srt`.
-- In-place downmixes write a hidden temp next to the source and atomically
-  replace it; the original is only overwritten after ffmpeg + mkvmerge succeed.
-  Each file is preflighted for free space (file size + margin).
+- In-place downmixes and censored tracks write a hidden temp next to the source
+  and atomically replace it; the original is only overwritten after ffmpeg
+  (+ mkvmerge, for downmixes) succeeds. Each file is preflighted for free space
+  (file size + margin).
+- Censor scratch audio lives in a per-job temp directory that is always removed,
+  never next to the movie.
 - Every job failure is reported with a non-zero exit code.
 - `--dry-run` shows the plan and changes nothing.
+
+## Credits
+
+- Swear-word list: [mmguero/cleanvid](https://github.com/mmguero/cleanvid)
+  (`mediafix/swears.txt`, BSD-3-Clause).
+- Censorship pipeline: ported from
+  [davidpeele/bleeparr_CLI](https://github.com/davidpeele/bleeparr_CLI) into a
+  library-style module for mediafix (MIT).
+- Online subtitle search: [subliminal](https://github.com/Diaoul/subliminal)
+  (MIT).
 
 ## Layout
 
 ```
 mediafix/            package (cli, scan, probe, srt, audio, subtitles,
-                     downmix, runner, tui, selftest, config)
-audio_downmix.py     vendored verbatim; the downmix engine
-tests/               84 unit, cli, runner, and real-ffmpeg integration tests
+                     censor, downmix, runner, tui, selftest, config)
+audio_downmix.py     vendored downmix engine (audio stream title parsing and
+                     a censor_prefix hook are the only local changes)
+tests/               154 unit, cli, runner, and integration tests
 ```
 
 Run tests: `python -m unittest discover -s tests -v`.

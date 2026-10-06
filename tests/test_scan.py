@@ -7,7 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mediafix import srt as srt_mod
 from mediafix import scan as scan_mod
-from mediafix.probe import AudioStreamInfo, MediaInfo, SubtitleStreamInfo
+from mediafix.censor import load_swears
+from mediafix.probe import AudioStreamInfo, CENSOR_TRACK_TITLE, MediaInfo, SubtitleStreamInfo
 
 
 def info(path="x.mkv", audio=(), subs=(), duration=100.0):
@@ -196,6 +197,63 @@ class ClassifyTests(unittest.TestCase):
         item = scan_mod.classify("x.mkv", broken, [], "en")
         self.assertFalse(item.selectable)
         self.assertFalse(item.needs_any)
+
+
+class ClassifyCensorTests(unittest.TestCase):
+    def setUp(self):
+        self.matcher = load_swears()  # packaged cleanvid list, matches "asshole"
+
+    def _classify(self, audio=(SURROUND_EN,), subs=(), sidecars=()):
+        return scan_mod.classify(
+            "x.mkv", info(audio=audio, subs=subs), list(sidecars), "en", swears=self.matcher
+        )
+
+    def test_off_when_no_swear_list_configured(self):
+        item = scan_mod.classify("x.mkv", info(audio=[SURROUND_EN]), [], "en")
+        self.assertFalse(item.needs_censor)
+
+    def test_no_sidecar_is_a_candidate(self):
+        item = self._classify()
+        self.assertTrue(item.needs_censor)
+        self.assertTrue(item.selectable)
+
+    def test_dirty_english_sidecar_is_a_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sidecar = Path(tmp) / "x.eng.srt"
+            sidecar.write_text("1\n00:00:00,000 --> 00:00:01,000\nYou asshole.\n", encoding="utf-8")
+            item = self._classify(sidecars=[scan_mod.SidecarInfo(str(sidecar), "eng", True, False)])
+            self.assertTrue(item.needs_censor)
+
+    def test_clean_english_sidecar_is_not_a_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sidecar = Path(tmp) / "x.eng.srt"
+            sidecar.write_text("1\n00:00:00,000 --> 00:00:01,000\nAll clean.\n", encoding="utf-8")
+            item = self._classify(sidecars=[scan_mod.SidecarInfo(str(sidecar), "eng", True, False)])
+            self.assertFalse(item.needs_censor)
+            self.assertFalse(item.selected)
+
+    def test_censored_track_already_present(self):
+        audio = [SURROUND_EN, dict(index=3, codec="aac", channels=2, title=CENSOR_TRACK_TITLE)]
+        self.assertFalse(self._classify(audio=audio).needs_censor)
+
+    def test_forced_sidecar_still_a_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sidecar = Path(tmp) / "x.eng.forced.srt"
+            sidecar.write_text("clean", encoding="utf-8")
+            item = self._classify(sidecars=[scan_mod.SidecarInfo(str(sidecar), "eng", True, True)])
+            self.assertEqual(item.needs_censor, True)
+
+
+class FilterCensorTests(unittest.TestCase):
+    def _items(self):
+        both = scan_mod.MediaItem(path="b.mkv", needs_subtitle=True, needs_audio=True)
+        cen = scan_mod.MediaItem(path="c.mkv", needs_censor=True)
+        clean = scan_mod.MediaItem(path="k.mkv")
+        return [both, cen, clean]
+
+    def test_censor_filter(self):
+        paths = [i.path for i in scan_mod.filter_items(self._items(), "censor")]
+        self.assertEqual(paths, ["c.mkv"])
 
 
 class WalkTests(unittest.TestCase):

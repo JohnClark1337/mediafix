@@ -43,6 +43,34 @@ def _add_downmix_options(parser) -> None:
                        help="parallel ffmpeg downmix workers")
 
 
+def _add_censor_options(parser) -> None:
+    group = parser.add_argument_group("censorship (bleeparr)")
+    group.add_argument("--swears", dest="swears_path", metavar="FILE",
+                       help="swear-word list (default: packaged cleanvid list)")
+    group.add_argument("--bleeptool", default=None,
+                       help="whisper passes: S, M and FSM combined with dashes (default: S-M-FSM)")
+    group.add_argument("--beep", action="store_true", default=None,
+                       help="insert a tone instead of a mute")
+    group.add_argument("--beep-mode", dest="beep_mode", choices=["words", "segments", "both"],
+                       help="beep only whisper words, full subtitle segments, or both")
+    group.add_argument("--pre-buffer", dest="pre_buffer_ms", type=int,
+                       help="pre-buffer mute milliseconds")
+    group.add_argument("--post-buffer", dest="post_buffer_ms", type=int,
+                       help="post-buffer mute milliseconds")
+    group.add_argument("--boost-db", dest="boost_db", type=int,
+                       help="audio boost in dB when extracting clips")
+    group.add_argument("--censor-audio-langs", dest="censor_audio_langs",
+                       help="comma-separated language tags to censor (default: eng,en,english,und)")
+    group.add_argument("--censor-models", dest="censor_models",
+                       help="whisper models for the S and M tiers, space or comma separated")
+    group.add_argument("--no-subtitle-search", dest="subtitle_search",
+                       action="store_false", default=None,
+                       help="disable online subtitle search; whisper is the only fallback")
+    group.add_argument("--subliminal-providers", dest="subliminal_providers",
+                       type=lambda value: [p.strip() for p in value.split(",") if p.strip()],
+                       help="comma-separated subliminal provider names (default: all keyless)")
+
+
 def _add_run_options(parser) -> None:
     parser.add_argument("--dry-run", action="store_true", help="show what would happen, change nothing")
     parser.add_argument("--force", action="store_true", help="downmix even if stereo already exists")
@@ -52,7 +80,7 @@ def _add_run_options(parser) -> None:
 
 def _add_scan_options(parser) -> None:
     parser.add_argument("paths", nargs="*", help="files or directories (searched recursively)")
-    parser.add_argument("--only", choices=("sub", "audio", "both"),
+    parser.add_argument("--only", choices=("sub", "audio", "censor", "both"),
                         help="restrict to one kind of problem")
     parser.add_argument("--filter", choices=scan_mod.FILTERS, default=scan_mod.FILTER_ALL)
     parser.add_argument("--limit", type=int, help="process at most this many files")
@@ -63,6 +91,9 @@ def _overrides(args) -> dict:
         "model", "device", "compute_type", "cpu_threads", "beam_size", "sub_language",
         "translate", "audio_stream", "sidecar_ext", "enhance", "voice", "bitrate",
         "loudness", "loudnorm", "replace", "remux", "downmix_jobs",
+        "swears_path", "bleeptool", "beep", "beep_mode", "pre_buffer_ms",
+        "post_buffer_ms", "boost_db", "censor_audio_langs", "censor_models",
+        "subtitle_search", "subliminal_providers",
     )
     return {key: getattr(args, key) for key in keys if getattr(args, key, None) is not None}
 
@@ -85,6 +116,7 @@ def _print_scan(result, items, limit=None) -> None:
         f"scanned {len(result.items)} file(s) in {len(result.roots)} root(s) "
         f"({result.cached} cached) "
         f"[sub:{result.needs_subtitle_count} audio:{result.needs_audio_count} "
+        f"censor:{result.needs_censor_count} "
         f"both:{result.both_count} clean:{result.clean_count} error:{result.failed_count}]"
     )
     if not items:
@@ -95,6 +127,7 @@ def _print_scan(result, items, limit=None) -> None:
         flags = []
         flags.append("SUB" if item.want_subtitle else "   ")
         flags.append("AUD" if item.want_audio else "   ")
+        flags.append("CEN" if item.want_censor else "   ")
         status = item.error or (
             f"{item.size and human_size(item.size)} {human_duration(item.duration)}".strip()
         )
@@ -110,11 +143,13 @@ def _select(items, only: str) -> list:
             continue
         want_sub = item.want_subtitle and only in ("sub", "both")
         want_aud = item.want_audio and only in ("audio", "both")
-        if not (want_sub or want_aud):
+        want_cen = item.want_censor and only in ("censor", "both")
+        if not (want_sub or want_aud or want_cen):
             continue
         item.selected = True
         item.want_subtitle = want_sub
         item.want_audio = want_aud
+        item.want_censor = want_cen
         chosen.append(item)
     return chosen
 
@@ -128,9 +163,13 @@ def _run_batch(config, items, dry_run, force, assume_yes):
 
     counts = {
         "subtitle": sum(1 for i in items if i.want_subtitle),
+        "censor": sum(1 for i in items if i.want_censor),
         "downmix": sum(1 for i in items if i.want_audio),
     }
-    print(f"planned {counts['subtitle']} subtitle job(s), {counts['downmix']} downmix job(s)")
+    print(
+        f"planned {counts['subtitle']} subtitle job(s), "
+        f"{counts['censor']} censor job(s), {counts['downmix']} downmix job(s)"
+    )
 
     if dry_run:
         print("dry-run: no files will be modified")
@@ -138,6 +177,8 @@ def _run_batch(config, items, dry_run, force, assume_yes):
             actions = []
             if item.want_subtitle:
                 actions.append("subtitle")
+            if item.want_censor:
+                actions.append("censor")
             if item.want_audio:
                 actions.append("downmix")
             print(f"  {' + '.join(actions)}: {item.path}")
@@ -216,9 +257,10 @@ def main(argv=None) -> int:
     parser.add_argument("--config", help="path to config.toml")
     sub = parser.add_subparsers(dest="command")
 
-    p_check = sub.add_parser("check", help="verify tools, ctranslate2 and model, then run a downmix roundtrip")
+    p_check = sub.add_parser("check", help="verify tools, ctranslate2 and model, then run downmix/censor roundtrips")
     p_check.add_argument("--skip-model", action="store_true", help="do not load the whisper model")
     p_check.add_argument("--skip-downmix", action="store_true", help="do not run the downmix roundtrip")
+    p_check.add_argument("--skip-censor", action="store_true", help="do not run the censorship roundtrip")
 
     p_tui = sub.add_parser("tui", help="interactive terminal interface (default)")
     # Only the path roots here: the TUI drives filtering/selection itself and
@@ -226,6 +268,7 @@ def main(argv=None) -> int:
     p_tui.add_argument("paths", nargs="*", help="files or directories (searched recursively)")
     _add_engine_options(p_tui)
     _add_downmix_options(p_tui)
+    _add_censor_options(p_tui)
 
     p_scan = sub.add_parser("scan", help="report what is missing without changing anything")
     _add_scan_options(p_scan)
@@ -238,6 +281,7 @@ def main(argv=None) -> int:
     _add_run_options(p_apply)
     _add_engine_options(p_apply)
     _add_downmix_options(p_apply)
+    _add_censor_options(p_apply)
     p_apply.add_argument("-y", "--yes", action="store_true", help="do not prompt for confirmation")
 
     args = parser.parse_args(argv)
@@ -246,7 +290,8 @@ def main(argv=None) -> int:
     if command == "check":
         config = config_mod.load(args.config, {})
         return selftest_mod.run(
-            config, model=not args.skip_model, downmix=not args.skip_downmix
+            config, model=not args.skip_model,
+            downmix=not args.skip_downmix, censor=not args.skip_censor,
         )
 
     config = config_mod.load(args.config, _overrides(args))
@@ -268,6 +313,7 @@ def main(argv=None) -> int:
                 "roots": result.roots,
                 "needs_subtitle": result.needs_subtitle_count,
                 "needs_audio": result.needs_audio_count,
+                "needs_censor": result.needs_censor_count,
                 "files": [i.path for i in items],
             }, indent=2))
             return EXIT_OK
