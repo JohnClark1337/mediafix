@@ -288,6 +288,30 @@ class RunTests(unittest.TestCase):
         self.assertEqual(summary.done, 6)
         self.assertLessEqual(active["peak"], 2)
 
+    def test_subtitle_exception_is_a_per_file_failure_not_a_crash(self):
+        class GuessingError(Exception):
+            pass
+
+        items = [item(f"{n}.mkv", audio=False) for n in range(3)]
+        ok = SubtitleResult("x.eng.srt", 12, "en", 60.0)
+        runner = runner_mod.Runner(self.config)
+        runner.plan(items)
+        with mock.patch(
+            "mediafix.subtitles.run_subtitle_job",
+            side_effect=[GuessingError("Insufficient data to process the guess"), ok, ok],
+        ):
+            summary = runner.run()
+
+        self.assertEqual(summary.failed, 1)
+        self.assertEqual(summary.done, 2)
+        self.assertEqual(
+            [j.state for j in runner.jobs],
+            [runner_mod.JOB_FAILED, runner_mod.JOB_DONE, runner_mod.JOB_DONE],
+        )
+        messages = [msg for (_, _, msg, _) in runner.events.queue if msg]
+        self.assertFalse(any("pipeline crashed" in msg for msg in messages))
+        self.assertEqual(summary.exit_code, 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

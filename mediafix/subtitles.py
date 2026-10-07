@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import shutil
@@ -11,6 +12,8 @@ from pathlib import Path
 from mediafix import audio as audio_mod
 from mediafix import probe as probe_mod
 from mediafix import srt as srt_mod
+
+logger = logging.getLogger(__name__)
 
 CHUNK_SECONDS = 600
 CHUNK_OVERLAP_SECONDS = 2
@@ -254,7 +257,12 @@ def download_subtitle_text(video_file, config) -> str | None:
     language = config.sidecar_language or "eng"
     providers = config.subliminal_providers or None
     provider_configs = dict(config.subliminal_provider_configs or {})
-    video = Video.fromname(str(video_file))
+    try:
+        video = Video.fromname(str(video_file))
+    except Exception as exc:  # noqa: BLE001 - guessit may refuse odd names
+        logger.warning("subliminal could not guess %r, skipping online search: %s: %s",
+                       video_file, type(exc).__name__, exc)
+        return None
 
     last_error: Exception | None = None
     for _attempt in range(2):

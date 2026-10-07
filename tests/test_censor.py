@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -11,8 +12,10 @@ from mediafix.censor import (
     CensorEngine, SwearMatcher, TimedSegment, _bleeptool_tiers, _build_censored_filtergraph,
     _fix_absolute_times, _normalize_whisper_word, _parse_ass, _parse_srt_loose, _parse_sub,
     _parse_vtt, _tier_model, bad_sections_from_file, find_bad_sections, fuzzy_match,
-    load_swears, mask_word, merge_whisper_and_subtitles, parse_timed_segments, select_mutes,
+    load_swears, mask_word, merge_whisper_and_subtitles, parse_timed_segments, run_censor_job,
+    select_mutes,
 )
+from mediafix.scan import MediaItem
 
 
 def matches(*entries):
@@ -314,6 +317,40 @@ class EngineCacheTests(unittest.TestCase):
             pass
         engine._models["small.en"] = _Fake()
         self.assertIsInstance(engine.model("small.en"), _Fake)
+
+
+class RunCensorJobTests(unittest.TestCase):
+    def test_subtitle_resolution_failure_becomes_a_result(self):
+        class GuessingError(Exception):
+            pass
+
+        item = MediaItem(path="/media/Movies/Apocalpyse Now.mkv", size=1024)
+        with mock.patch("mediafix.downmix.check_space", return_value=None), \
+             mock.patch("mediafix.subtitles.existing_sidecar", return_value=None), \
+             mock.patch(
+                 "mediafix.subtitles.resolve_temp_subtitle",
+                 side_effect=GuessingError("Insufficient data to process the guess"),
+             ):
+            result = run_censor_job(mock.Mock(), item, config_mod.Config())
+
+        self.assertIsNotNone(result.error)
+        self.assertIn("censor pipeline failed", result.error)
+        self.assertFalse(result.ok)
+        self.assertIs(result.skipped, False)
+        self.assertFalse(result.cancelled)
+
+    def test_unexpected_error_also_becomes_a_result(self):
+        class Boom(Exception):
+            pass
+
+        item = MediaItem(path="/media/Movies/Boom.mkv", size=1024)
+        with mock.patch("mediafix.downmix.check_space", return_value=None), \
+             mock.patch("mediafix.subtitles.existing_sidecar", return_value=None), \
+             mock.patch("mediafix.subtitles.resolve_temp_subtitle", side_effect=Boom("kapow")):
+            result = run_censor_job(mock.Mock(), item, config_mod.Config())
+
+        self.assertIsNotNone(result.error)
+        self.assertIn("Boom", result.error)
 
 
 if __name__ == "__main__":

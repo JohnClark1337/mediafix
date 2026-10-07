@@ -180,7 +180,11 @@ specific stream.
 
 A file **needs subtitles** when it has no embedded English subtitle stream and
 no English sidecar (`name.srt`, `name.en.srt`, `name.eng.srt`; other languages
-do not count).
+do not count). Subtitle jobs resolve in order: existing sidecar, embedded
+stream, online search, then Whisper transcription. If the online search cannot
+even parse the filename (subliminal's `guessit` has odd names it refuses), that
+one file simply skips the search and falls back to Whisper — it is logged, never
+fatal, and never aborts the rest of the run.
 
 A file **needs a downmix** when it has a ≥6-channel audio track and no existing
 two-channel English track. The generated track is tagged `language=eng` and
@@ -232,7 +236,7 @@ mediafix/            package (cli, scan, probe, srt, audio, subtitles,
                      censor, downmix, runner, tui, selftest, config)
 audio_downmix.py     vendored downmix engine (audio stream title parsing and
                      a censor_prefix hook are the only local changes)
-tests/               154 unit, cli, runner, and integration tests
+tests/               162 unit, cli, runner, and integration tests
 ```
 
 Run tests: `python -m unittest discover -s tests -v`.

@@ -87,7 +87,7 @@ audio_downmix.py (vendored, small local patch)
 config.example.toml  Dockerfile  docker-compose.yml  requirements.txt  PLAN.md
 tests/
   test_scan.py  test_downmix.py  test_runner.py  test_integration.py  test_cli.py
-  test_censor.py  test_regressions.py  test_cache.py
+  test_censor.py  test_regressions.py  test_cache.py  test_subtitles.py
 ```
 
 ## 7. Detection rules
@@ -125,7 +125,7 @@ All four accept `--config`; every config key is overridable via
 
 ## 10. Tests
 
-154 tests total: unit, cli, runner, integration (real ffmpeg) plus a dedicated
+162 tests total: unit, cli, runner, integration (real ffmpeg) plus a dedicated
 `test_censor.py` and censor coverage in scan/runner/cli. 12 require `textual` /
 `faster_whisper` / `huggingface_hub` and are skipped in a bare host environment
 (subliminal/`srt` gate the corresponding sections and checks). All green in the
@@ -146,6 +146,15 @@ Ubuntu container.
   the user did not ask for.
 - `beep_mode` defaults to `""` (no beep). `words`/`segments`/`both` only take
   effect when `beep = true`.
+- A filename `subliminal`'s `guessit` cannot parse (e.g. `Apocalpyse Now.mkv`)
+  used to raise `GuessingError: Insufficient data to process the guess` out of
+  `Video.fromname`, which `_safe_cpu` reported as "subtitle/censor pipeline
+  crashed" and silently cancelled every remaining CPU job. `download_subtitle_text`
+  now treats a guessing failure as *no online subtitle found* (log + return
+  `None`), so the file degrades to Whisper transcription / "no subtitles for
+  censorship" like any other unsuccessful search; `_run_subtitle` and
+  `run_censor_job` additionally swallow per-file exceptions into a failed result,
+  so no single file can abort the pipeline.
 
 ## Textual API and attribute-name constraints
 

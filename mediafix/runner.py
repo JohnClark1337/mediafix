@@ -172,11 +172,17 @@ class Runner:
 
     def _run_subtitle(self, job: Job, engine) -> None:
         self._emit(job, JOB_RUNNING, "starting")
-        result = sub_mod.run_subtitle_job(
-            engine, job.item, self.config,
-            progress=lambda fraction, message, _job=job: self._emit(_job, progress=fraction, message=message),
-            cancel=self.cancel_event,
-        )
+        try:
+            result = sub_mod.run_subtitle_job(
+                engine, job.item, self.config,
+                progress=lambda fraction, message, _job=job: self._emit(_job, progress=fraction, message=message),
+                cancel=self.cancel_event,
+            )
+        except Exception as exc:  # noqa: BLE001 - per-file failures never crash the batch
+            error = f"{type(exc).__name__}: {exc}"
+            self._emit(job, JOB_FAILED, error)
+            self._sub_outcome[job.path] = (False, f"failed: {error}")
+            return
         if result.error:
             self._emit(job, JOB_FAILED, result.error)
             self._sub_outcome[job.path] = (False, f"failed: {result.error}")

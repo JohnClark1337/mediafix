@@ -832,6 +832,18 @@ class CensorResult:
 def run_censor_job(engine, item, config, progress=None,
                    cancel: threading.Event | None = None) -> CensorResult:
     """Full censorship pipeline for one item. Never raises for user input."""
+    try:
+        return _run_censor_job(engine, item, config, progress=progress, cancel=cancel)
+    except Exception as exc:  # noqa: BLE001 - report, never crash the batch
+        return CensorResult(
+            item.path,
+            error=f"censor pipeline failed: {type(exc).__name__}: {exc}",
+        )
+
+
+def _run_censor_job(engine, item, config, progress=None,
+                    cancel: threading.Event | None = None) -> CensorResult:
+    """Full censorship pipeline for one item. Callers must expect no raise."""
     shortage = downmix_mod.check_space(item.path, item.size, config.free_space_margin_gb)
     if shortage:
         return CensorResult(item.path, error=shortage)
