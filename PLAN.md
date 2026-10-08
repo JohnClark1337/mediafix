@@ -125,7 +125,7 @@ All four accept `--config`; every config key is overridable via
 
 ## 10. Tests
 
-162 tests total: unit, cli, runner, integration (real ffmpeg) plus a dedicated
+168 tests total: unit, cli, runner, integration (real ffmpeg) plus a dedicated
 `test_censor.py` and censor coverage in scan/runner/cli. 12 require `textual` /
 `faster_whisper` / `huggingface_hub` and are skipped in a bare host environment
 (subliminal/`srt` gate the corresponding sections and checks). All green in the
@@ -216,6 +216,26 @@ elapsed seconds from `time.monotonic()`; byte totals live in `total_bytes`.
 - Transcribed audio is chunked at 600s with 2s overlap to bound peak memory.
 - `tui` originally lacked the `paths` positional and crashed with `AttributeError`;
   `tests/test_cli.py` now guards path parsing for every subcommand.
+
+## TUI selection vs job flags
+
+`selected` (which files run) and `want_subtitle` / `want_audio` /
+`want_censor` (which jobs each file gets) are independent. The space handler
+used to reset `want_*` from `needs_*` on select and clear them on deselect, so
+a censor flag you unchecked came back the next time you touched the row;
+Select all/None/Invert reset them too. Selection now flips only `selected`.
+
+- Bulk `S`/`A`/`C` and the *jobs for the selection* buttons apply to the
+  selected rows (every visible row when nothing is selected, with a notice),
+  are state-aware (check if any selected row is unchecked, uncheck if all are
+  on) and clamp to `needs_*` — a file that does not need a job can never carry
+  its flag. The per-row `s`/`a`/`c` keys clamp the same way.
+- Every toolbar region is its own titled border block (`border_title`) so the
+  controls read as separate groups. Buttons inside them need
+  `border: none; height: 1; min-height: 1`: Textual's default button is three
+  rows tall (top/bottom border box), which pushed the table off an 80x24
+  screen. `border_top`-only rules render their `border_title` fine, so the
+  separators cost one line each instead of two.
 
 ## 12. Build commands
 

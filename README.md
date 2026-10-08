@@ -150,19 +150,29 @@ flags (`--swears`, `--bleeptool`, `--beep`, `--beep-mode`, `--pre-buffer`,
 
 | Key | Action |
 |---|---|
-| `space` | toggle selection of the highlighted file |
-| `s` / `a` / `c` | toggle subtitle / downmix / censorship for the file |
-| `S` / `A` / `C` | toggle subtitle / downmix / censorship for every visible file |
+| `space` | toggle selection of the highlighted file; the per-file job flags are kept |
+| `s` / `a` / `c` | toggle subtitle / downmix / censorship for the highlighted file |
+| `S` / `A` / `C` | check or uncheck subtitle / downmix / censorship for the selected rows (every visible row when nothing is selected) |
 | `f` | cycle filter: all / sub / audio / both / censor / clean |
-| `r` | toggle dry-run |
+| `r` | toggle dry-run (same as the Dry run button) |
 | `enter` | start the run |
 | `esc` | back, or cancel a running job |
 
-Each file row shows a `Sub`/`Aud`/`Cen` column: `want` once picked, `miss`
-when it needs work but is not picked, `-` when it needs nothing. While a run is
-in progress, `esc` or `c` cancels; a sidecar already written is left in place,
-a partially-written one is never published, and a censored track is only ever
-swapped in after ffmpeg finishes.
+The toolbar is split into titled blocks so the controls never blur together:
+**status** (dry-run state and counts), **filter**, **selection** (Select all /
+None / Invert), **jobs for the selection** (Subs / Downmix / Censor on-off) and
+**run** (Start, Dry run, Rescan). The bulk job keys and buttons are state-aware:
+if any selected row has the flag off they check it everywhere, and if every
+selected row already has it they uncheck it everywhere. Selection and job flags
+are independent — a flag you cleared stays cleared through space, Select
+all/None/Invert and refiltering. Flags only turn on for files that actually
+need the job; a toggle on a file that needs nothing changes nothing.
+
+Each file row shows a `Sub`/`Aud`/`Cen` column: `want` (green) once picked,
+`miss` (yellow) when it needs work but is not picked, `-` (dim) when it needs
+nothing. While a run is in progress, `esc` or `c` cancels; a sidecar already
+written is left in place, a partially-written one is never published, and a
+censored track is only ever swapped in after ffmpeg finishes.
 
 ## Configuration
 
@@ -236,7 +246,7 @@ mediafix/            package (cli, scan, probe, srt, audio, subtitles,
                      censor, downmix, runner, tui, selftest, config)
 audio_downmix.py     vendored downmix engine (audio stream title parsing and
                      a censor_prefix hook are the only local changes)
-tests/               162 unit, cli, runner, and integration tests
+tests/               168 unit, cli, runner, and integration tests
 ```
 
 Run tests: `python -m unittest discover -s tests -v`.

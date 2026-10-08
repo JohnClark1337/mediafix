@@ -31,6 +31,8 @@ class ScanTimingTests(unittest.TestCase):
             sub_language="eng",
             ffprobe="ffprobe",
             cache_path=tmp / "cache.json",
+            swears_path=None,
+            censor_track_title="Censored (Bleeparr)",
         )
         return cfg
 
@@ -202,6 +204,7 @@ class SelectScreenInteractionTests(unittest.TestCase):
                     video_ext={".mkv"}, subtitle_ext={".srt"}, sub_language="eng",
                     ffprobe="ffprobe", cache_path=None, model="small",
                     device="cpu", compute_type="int8", jobs=2,
+                    swears_path=None, censor_track_title="Censored (Bleeparr)",
                 )
                 from mediafix import tui as tui_mod
 
@@ -253,17 +256,200 @@ class SelectScreenInteractionTests(unittest.TestCase):
             await pilot.pause()
             self.assertNotEqual(screen.mode, "all", "'f' cycles the filter")
 
+            from textual.widgets import Button
+
+            active = screen.query_one(f"#filter-{screen.mode}", Button)
+            self.assertEqual(active.variant, "primary", "the active filter is highlighted")
+            self.assertEqual(screen.query_one("#filter-all", Button).variant, "default")
+            self.assertIn(screen.mode, str(table.border_title))
+
             await pilot.press("r")
             await pilot.pause()
             self.assertTrue(app.dry_run, "'r' toggles dry run")
 
         self._run(body)
 
-    def test_bulk_toggle_selects_all_shown(self):
+    def test_bulk_toggles_every_visible_row_when_nothing_selected(self):
         async def body(pilot, screen, app):
+            self.assertTrue(all(i.want_subtitle for i in screen.shown))
+            await pilot.press("S")
+            await pilot.pause()
+            self.assertTrue(
+                all(not i.want_subtitle for i in screen.shown),
+                "S with nothing selected falls back to every visible row",
+            )
             await pilot.press("S")
             await pilot.pause()
             self.assertTrue(all(i.want_subtitle for i in screen.shown))
+
+        self._run(body)
+
+
+class SelectFlagTests(unittest.TestCase):
+    """Selection and the per-file job flags are independent of each other.
+
+    Regression: unchecking censoring (or subs/downmix) and then pressing
+    space used to restore the flag, because the space handler reset every
+    want_* from needs_* on select and cleared them on deselect.
+    """
+
+    @staticmethod
+    def _items():
+        # Mirrors scan.classify: a fresh item's flags start equal to its needs.
+        return [
+            scan_mod.MediaItem(
+                path="a.mkv", size=1, duration=1.0,
+                needs_subtitle=True, needs_audio=False, needs_censor=True,
+                want_subtitle=True, want_audio=False, want_censor=True,
+            ),
+            scan_mod.MediaItem(
+                path="b.mkv", size=1, duration=1.0,
+                needs_subtitle=True, needs_audio=True, needs_censor=False,
+                want_subtitle=True, want_audio=True, want_censor=False,
+            ),
+        ]
+
+    def _run(self, body, items=None):
+        async def main():
+            import argparse
+
+            cfg = argparse.Namespace(
+                video_ext={".mkv"}, subtitle_ext={".srt"}, sub_language="eng",
+                ffprobe="ffprobe", cache_path=None, model="small",
+                device="cpu", compute_type="int8", jobs=2,
+                swears_path=None, censor_track_title="Censored (Bleeparr)",
+            )
+            from mediafix import tui as tui_mod
+
+            app = tui_mod.MediaFixApp(config=cfg, roots=[])
+            app.result = scan_mod.ScanResult(
+                roots=["."], items=list(items or self._items())
+            )
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app.push_screen(tui_mod.SelectScreen(app))
+                await pilot.pause()
+                await pilot.pause()
+                await body(pilot, app.screen, app)
+
+        asyncio.run(main())
+
+    def test_space_preserves_an_unchecked_flag(self):
+        async def body(pilot, screen, app):
+            item = screen.shown[0]
+            self.assertTrue(item.want_censor)
+            await pilot.press("space")
+            await pilot.pause()
+            self.assertTrue(item.selected)
+
+            await pilot.press("c")
+            await pilot.pause()
+            self.assertFalse(item.want_censor)
+
+            await pilot.press("space")
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.pause()
+            self.assertTrue(item.selected)
+            self.assertFalse(
+                item.want_censor,
+                "deselect + reselect must not restore a cleared flag",
+            )
+
+        self._run(body)
+
+    def test_selection_buttons_preserve_flags(self):
+        async def body(pilot, screen, app):
+            item = screen.shown[0]
+            await pilot.press("c")
+            await pilot.pause()
+            self.assertFalse(item.want_censor)
+
+            await pilot.click("#sel-all")
+            await pilot.pause()
+            self.assertTrue(item.selected)
+            self.assertFalse(item.want_censor, "Select all must not reset flags")
+
+            await pilot.click("#sel-none")
+            await pilot.pause()
+            self.assertFalse(item.selected)
+            self.assertFalse(item.want_censor, "None must not reset flags")
+
+            await pilot.click("#sel-invert")
+            await pilot.pause()
+            self.assertTrue(item.selected)
+            self.assertFalse(item.want_censor, "Invert must not reset flags")
+
+        self._run(body)
+
+    def test_bulk_scopes_to_the_selected_rows(self):
+        async def body(pilot, screen, app):
+            first, second = screen.shown
+            await pilot.press("space")
+            await pilot.pause()
+            self.assertTrue(first.selected)
+
+            # Only row 0 is selected and already has subs on -> one press
+            # unchecks just that row.
+            await pilot.press("S")
+            await pilot.pause()
+            self.assertFalse(first.want_subtitle)
+            self.assertTrue(second.want_subtitle, "unselected rows are untouched")
+            self.assertFalse(second.selected)
+
+            await pilot.press("S")
+            await pilot.pause()
+            self.assertTrue(first.want_subtitle)
+            self.assertTrue(first.selected)
+
+        self._run(body)
+
+    def test_bulk_checks_when_any_selected_row_is_unchecked(self):
+        async def body(pilot, screen, app):
+            first, second = screen.shown
+            first.selected = second.selected = True
+            first.want_subtitle = False
+            await pilot.press("S")
+            await pilot.pause()
+            self.assertTrue(first.want_subtitle)
+            self.assertTrue(second.want_subtitle)
+
+        self._run(body)
+
+    def test_toggles_clamp_to_what_the_file_needs(self):
+        async def body(pilot, screen, app):
+            first, second = screen.shown
+            # Row 0 needs no downmix: 'a' must not flag it.
+            await pilot.press("a")
+            await pilot.pause()
+            self.assertFalse(first.want_audio)
+            self.assertFalse(first.selected, "a no-op toggle must not select")
+
+            # Bulk downmix over a selection that includes the clean file.
+            first.selected = second.selected = True
+            second.want_audio = False
+            await pilot.press("A")
+            await pilot.pause()
+            self.assertFalse(first.want_audio, "files without the need stay off")
+            self.assertTrue(second.want_audio)
+            self.assertTrue(second.selected)
+
+        self._run(body)
+
+    def test_dry_run_button_follows_the_key(self):
+        async def body(pilot, screen, app):
+            from textual.widgets import Button
+
+            button = screen.query_one("#dry-btn", Button)
+            self.assertEqual(str(button.label), "Dry run: off")
+            await pilot.press("r")
+            await pilot.pause()
+            self.assertEqual(str(button.label), "Dry run: on")
+            self.assertEqual(button.variant, "warning")
+            await pilot.click("#dry-btn")
+            await pilot.pause()
+            self.assertEqual(str(button.label), "Dry run: off")
+            self.assertFalse(app.dry_run)
 
         self._run(body)
 
