@@ -117,6 +117,14 @@ class MediaFixApp(App):
         margin: 0 1 0 0;
     }
     #filter-bar .filter-btn { min-width: 9; }
+    #filter-buttons { height: 1; }
+    #search-input {
+        height: 1;
+        border: none;
+        padding: 0 1;
+        background: $panel;
+    }
+    #search-input:focus { background: $boost; }
     #items {
         height: 1fr;
         margin: 0 2 1 2;
@@ -179,7 +187,13 @@ class MediaFixApp(App):
         self.push_screen(ScanScreen(self))
 
     def rescan(self) -> None:
-        self.push_screen(ScanScreen(self))
+        """Go back to the scan screen.
+
+        The scan screen is reused instead of pushing a new one: pushing would
+        grow the screen stack on every rescan and leave dead screens
+        underneath, with the scan button still disabled.
+        """
+        self.pop_screen()
 
 
 class ScanScreen(Screen):
@@ -202,6 +216,18 @@ class ScanScreen(Screen):
     def on_mount(self) -> None:
         self.query_one("#scan-box", Vertical).border_title = "scan library"
         self.query_one("#root-input", Input).focus()
+
+    def on_screen_resume(self) -> None:
+        """Re-arm the screen when the selection screen pops back to it.
+
+        Without this the scan button stays disabled after the first scan and
+        the screen is a dead end.
+        """
+        try:
+            self.query_one("#scan-btn", Button).disabled = False
+            self.query_one("#scan-status", Static).update("")
+        except Exception:  # noqa: BLE001 - screen may be mid-teardown
+            pass
 
     @on(Button.Pressed, "#scan-btn")
     def _start(self) -> None:
@@ -249,6 +275,21 @@ class ScanScreen(Screen):
         self.app.exit()
 
 
+class SearchInput(Input):
+    """The wildcard search box on the selection screen.
+
+    Escape clears the pattern and hands focus back to the table. The binding
+    lives here rather than on the screen so it wins over the screen's "back"
+    binding while the box has focus.
+    """
+
+    BINDINGS = [Binding("escape", "clear_search", "clear search", show=False)]
+
+    def action_clear_search(self) -> None:
+        self.value = ""
+        self.screen.query_one("#items", DataTable).focus()
+
+
 class SelectScreen(Screen):
     # Column labels, in the same order as SelectScreen._cells returns values.
     COLUMNS = ("Sel", "Sub", "Aud", "Cen", "Size", "Length", "File")
@@ -269,24 +310,52 @@ class SelectScreen(Screen):
         Binding("A", "bulk_audio", "audio sel"),
         Binding("C", "bulk_censor", "censor sel"),
         Binding("f", "cycle_filter", "filter"),
+        Binding("slash", "focus_search", "search"),
         Binding("r", "toggle_dry_run", "dry run"),
-        Binding("enter", "start_run", "run"),
+        # The table has focus, and a focused DataTable binds "enter" to
+        # select_cursor. A normal binding would lose that race, so this one
+        # is priority: the app checks priority bindings before forwarding a
+        # key to the focused widget.
+        Binding("enter", "start_run", "run", priority=True),
         Binding("escape", "back", "back"),
     ]
+
+    # Actions the screen must not run while the search box has focus. The
+    # priority "enter" binding in particular is checked before the focused
+    # widget, and the letter bindings would otherwise swallow typed text.
+    SEARCH_BLOCKED_ACTIONS = frozenset({
+        "toggle_row", "toggle_sub", "toggle_audio", "toggle_censor",
+        "bulk_sub", "bulk_audio", "bulk_censor", "cycle_filter",
+        "toggle_dry_run", "start_run", "back", "focus_search",
+    })
 
     def __init__(self, mediafix: MediaFixApp):
         super().__init__()
         self.mediafix = mediafix
         self.mode = FILTER_ALL
+        self.pattern = ""
         self.shown: list = []
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        searching = isinstance(self.focused, SearchInput)
+        if searching and action in self.SEARCH_BLOCKED_ACTIONS:
+            # None disables the action but keeps the footer stable (greyed).
+            # A disabled action also lets the key fall through to the input.
+            return None
+        return True
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Vertical(id="select-body"):
             yield Static("", id="select-summary")
-            with Horizontal(id="filter-bar"):
-                for mode in FILTERS:
-                    yield Button(mode, id=f"filter-{mode}", classes="filter-btn")
+            with Vertical(id="filter-bar"):
+                with Horizontal(id="filter-buttons"):
+                    for mode in FILTERS:
+                        yield Button(mode, id=f"filter-{mode}", classes="filter-btn")
+                yield SearchInput(
+                    placeholder="search name or path: * ? [seq]   (/ to edit, esc clears)",
+                    id="search-input",
+                )
             with Horizontal(id="select-bar"):
                 yield Button("Select all", id="sel-all")
                 yield Button("None", id="sel-none")
@@ -326,12 +395,14 @@ class SelectScreen(Screen):
 
         table.clear(columns=True)
         table.add_columns(*self._headers())
-        self.shown = scan_mod.filter_items(self.mediafix.result.items, self.mode)
+        items = scan_mod.filter_items(self.mediafix.result.items, self.mode)
+        self.shown = scan_mod.filter_by_pattern(items, self.pattern)
         for index, item in enumerate(self.shown):
             table.add_row(*self._cells(item), key=str(index))
         if self.shown:
             table.move_cursor(row=min(max(previous or 0, 0), len(self.shown) - 1))
-        table.border_title = f"{self.mode} - {len(self.shown)} of {len(self.mediafix.result.items)} files"
+        label = self.mode if not self.pattern else f"{self.mode}  {self.pattern}"
+        table.border_title = f"{label} - {len(self.shown)} of {len(self.mediafix.result.items)} files"
         self._update_filter_buttons()
         self._update_summary()
 
@@ -387,17 +458,25 @@ class SelectScreen(Screen):
 
     def _update_summary(self) -> None:
         result = self.mediafix.result
-        selected = sum(1 for i in self.shown if i.selected)
-        subs = sum(1 for i in self.shown if i.selected and i.want_subtitle)
-        cens = sum(1 for i in self.shown if i.selected and i.want_censor)
-        auds = sum(1 for i in self.shown if i.selected and i.want_audio)
+        # The counts cover the whole result, not just the visible rows: a
+        # filter hides rows, it does not deselect them.
+        items = result.items
+        shown_ids = {id(s) for s in self.shown}
+        selected = sum(1 for i in items if i.selected)
+        subs = sum(1 for i in items if i.selected and i.want_subtitle)
+        cens = sum(1 for i in items if i.selected and i.want_censor)
+        auds = sum(1 for i in items if i.selected and i.want_audio)
+        hidden = sum(
+            1 for i in items if i.selected and id(i) not in shown_ids
+        )
         mode = "[bold red]DRY RUN" if self.mediafix.dry_run else "[bold green]LIVE"
+        hidden_note = f" ([dim]{hidden} hidden by filter/search[/])" if hidden else ""
         text = (
-            f"{mode}[/] | [bold]{len(self.shown)}/{len(result.items)}[/] | "
+            f"{mode}[/] | [bold]{len(self.shown)}/{len(result.items)}[/] shown | "
             f"missing: [yellow]{result.needs_subtitle_count}[/] sub, "
             f"[yellow]{result.needs_audio_count}[/] stereo, "
             f"[yellow]{result.needs_censor_count}[/] swears | "
-            f"selected [bold cyan]{selected}[/]: "
+            f"selected [bold cyan]{selected}[/]{hidden_note}: "
             f"[green]{subs}[/] sub, [green]{cens}[/] cen, [green]{auds}[/] aud"
         )
         self.query_one("#select-summary", Static).update(text)
@@ -444,8 +523,14 @@ class SelectScreen(Screen):
                 self.notify(f"this file needs no {label}", severity="information")
             return
         setattr(item, key, not getattr(item, key))
-        if getattr(item, key):
-            item.selected = True
+        # A job flag never changes the selection: the selection is what the
+        # user asked to run. Silently adding a file to the run set would run
+        # its other flagged jobs too.
+        if getattr(item, key) and not item.selected:
+            self.notify(
+                f"{label} flagged, but the row is not selected - press space to run it",
+                severity="information",
+            )
         self._refresh(item)
 
     def action_bulk_sub(self) -> None:
@@ -493,7 +578,10 @@ class SelectScreen(Screen):
         turn_on = any(not getattr(i, key) for i in eligible)
         for item in eligible:
             setattr(item, key, turn_on)
-            if turn_on:
+            if turn_on and fallback:
+                # The fallback touched every visible row, most of which are
+                # not selected. Flags only run on selected rows, so they have
+                # to be selected here or the change would do nothing.
                 item.selected = True
         self._rebuild()
         verb = "enabled" if turn_on else "disabled"
@@ -504,6 +592,21 @@ class SelectScreen(Screen):
         self.mode = FILTERS[(index + 1) % len(FILTERS)]
         self._rebuild()
 
+    def action_focus_search(self) -> None:
+        search = self.query_one("#search-input", SearchInput)
+        search.focus()
+        # Replace the old pattern on the first keystroke instead of appending.
+        search.select_all()
+
+    @on(Input.Changed, "#search-input")
+    def _search_changed(self, event: Input.Changed) -> None:
+        self.pattern = event.value
+        self._rebuild()
+
+    @on(Input.Submitted, "#search-input")
+    def _search_submitted(self) -> None:
+        self.query_one("#items", DataTable).focus()
+
     def action_toggle_dry_run(self) -> None:
         self.mediafix.dry_run = not self.mediafix.dry_run
         self._update_dry_button()
@@ -512,8 +615,18 @@ class SelectScreen(Screen):
     def action_back(self) -> None:
         self.app.pop_screen()
 
+    def _selected_items(self) -> list:
+        """Every selected, actionable item - including rows hidden by a filter.
+
+        The filter only decides what is on screen. A selected row stays
+        selected, so Start must not silently drop the hidden ones.
+        """
+        return [
+            i for i in self.mediafix.result.items if i.selected and i.actionable
+        ]
+
     def action_start_run(self) -> None:
-        items = [i for i in self.shown if i.selected and i.actionable]
+        items = self._selected_items()
         if not items:
             self.notify("nothing selected", severity="warning")
             return
@@ -583,7 +696,6 @@ class SelectScreen(Screen):
 
     @on(Button.Pressed, "#sel-rescan")
     def _rescan(self) -> None:
-        self.app.pop_screen()
         self.mediafix.rescan()
 
 
@@ -671,6 +783,14 @@ class RunScreen(Screen):
     def _abort(self, message: str) -> None:
         self._finished = True
         self.query_one("#run-summary", Static).update(f"cannot start: {message}")
+        self.query_one("#run-current", Static).update("nothing was changed")
+        # The run never started, so there is nothing to cancel and nothing to
+        # wait for. The back button has to be enabled here, otherwise the
+        # screen is a dead end: _poll stops once _finished is set, so _finish
+        # (which enables it) never runs.
+        self.query_one("#back-btn", Button).disabled = False
+        self.query_one("#cancel-btn", Button).disabled = True
+        self._log(f"cannot start: {message}")
 
     def _record_summary(self, summary) -> None:
         self.summary = summary

@@ -75,20 +75,16 @@ def check_cache_writable() -> list[str]:
     file next to the model cache. If HF_HOME points somewhere unwritable the
     only symptom is a bare PermissionError deep inside the library.
     """
+    from mediafix import cache as cache_mod
+
     lines = []
     home = os.environ.get("HF_HOME") or "(unset)"
     lines.append(f"  HF_HOME={home}")
     lines.append(f"  HOME={os.environ.get('HOME') or '(unset)'}")
     lines.append(f"  uid={_uid()} cwd={os.getcwd()}")
 
-    try:
-        from huggingface_hub import constants
-    except ImportError:
-        lines.append("  huggingface_hub not installed yet; skipping")
-        return lines
-
-    cache = constants.HF_HOME
-    token = constants.HF_TOKEN_PATH
+    cache = cache_mod.resolve_hf_home()
+    token = cache_mod.resolve_token_path(cache)
     lines.append(f"  resolved cache={cache}")
     lines.append(f"  resolved token={token}")
 

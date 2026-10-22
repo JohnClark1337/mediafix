@@ -1,7 +1,7 @@
 # mediafix — build plan
 
 **Status:** implemented and running CPU-only; censorship ("bleeparr") added.
-Last updated 2026-10-06.
+Last updated 2026-10-22.
 For user-facing docs see [README.md](README.md); this file records the design
 decisions and the reasoning behind them.
 
@@ -73,7 +73,7 @@ pipeline (bounded memory) but never leaves the downmix pool stuck.
 
 ## 5. Reuse
 
-- `audio_downmix.py` vendored. Reused: `probe_file`, `needs_downmix`, `is_english`, `has_english_stereo`, `process_one`, `make_parser`, `resolve_output_path`, `check_tools`, `check_filter_support`. Two small local changes keep default behavior byte-identical: `analyze_file` parses an audio stream `title` (for the censored-track prefix) and `has_english_stereo`/`build_command` accept a `censor_prefix=None` so a downmix limiter can restrict targets to censored surround tracks when one exists.
+- `audio_downmix.py` vendored. Reused: `probe_file`, `needs_downmix`, `is_english`, `has_english_stereo`, `process_one`, `make_parser`, `resolve_output_path`, `check_tools`, `check_filter_support`. Three small local changes keep default behavior byte-identical: `analyze_file` parses an audio stream `title` (for the censored-track prefix), `has_english_stereo`/`build_command` accept a `censor_prefix=None` so a downmix limiter can restrict targets to censored surround tracks when one exists, and `process_one` honours an optional `args.cancel_check` hook (with `STATUS_CANCELLED`) so a cancelled run stops ffmpeg and never replaces the original.
 - faster-whisper + PyAV extraction ported to `mediafix/audio.py` (16 kHz mono float32, chunked transcription).
 - Censorship ported from `davidpeele/bleeparr_CLI` into `mediafix/censor.py`, library-style: no module-level argparse, no `exit()`, scratch files under a per-job `tempfile` dir (never `clips/` next to the movie), Whisper models cached per `CensorEngine`, and every failure is a result/exception instead of a hard exit.
 
@@ -83,6 +83,7 @@ pipeline (bounded memory) but never leaves the downmix pool stuck.
 mediafix/
   __init__.py  cli.py  config.py  probe.py  scan.py
   srt.py  audio.py  subtitles.py  censor.py  downmix.py  runner.py  tui.py  selftest.py
+  cache.py
 audio_downmix.py (vendored, small local patch)
 config.example.toml  Dockerfile  docker-compose.yml  requirements.txt  PLAN.md
 tests/
@@ -103,8 +104,10 @@ tests/
 - `mediafix tui [paths...]` (default) — Textual UI. Takes path roots only; it
   deliberately has no `--filter`/`--only`/`--limit`, which would collide with
   the UI's own key bindings.
-- `mediafix scan [paths...]` — report, `--json`, `--only`, `--filter`, `--limit`.
-- `mediafix apply [paths...]` — non-interactive, `--dry-run`, `--force`, `-y`.
+- `mediafix scan [paths...]` — report, `--json`, `--only`, `--filter`, `--match`,
+  `--limit`, `--cache`, `--no-cache`.
+- `mediafix apply [paths...]` — non-interactive, `--dry-run`, `--force`, `-y`;
+  also takes `--only`, `--filter` and `--match`.
 - `mediafix check` — tools, ctranslate2, model, SRT roundtrip, downmix roundtrip,
   censorship roundtrip (`--skip-model`, `--skip-downmix`, `--skip-censor`).
 
@@ -113,23 +116,26 @@ roundtrip in `check` runs the full pipeline against a generated 2 s clip with a
 seeded `.eng.srt` sidecar and an injected fake Whisper model, then verifies a
 `Censored (Bleeparr)` track exists via ffprobe.
 
-All four accept `--config`; every config key is overridable via
-`MEDIAFIX_<KEY>`. Paths default to `$MEDIA_ROOT` when omitted.
+All four accept `--config`, before *and* after the subcommand; every config key is
+overridable via `MEDIAFIX_<KEY>`. Paths default to `$MEDIA_ROOT` when omitted.
 
 ## 9. Safety
 
 - Atomic sidecar writes (`os.replace`), no partial files.
 - In-place downmix: temp next to source, atomic replace, disk preflight (margin).
+- A cancelled downmix removes the temp file and leaves the original untouched.
+- The original's permission bits are copied onto the temp file before the
+  replace (ffmpeg's temp file carries ffmpeg's mode).
 - Per-job errors surfaced, non-zero exit on failures.
 - Runs as `${UID}:${GID}` in container.
 
 ## 10. Tests
 
-168 tests total: unit, cli, runner, integration (real ffmpeg) plus a dedicated
-`test_censor.py` and censor coverage in scan/runner/cli. 12 require `textual` /
-`faster_whisper` / `huggingface_hub` and are skipped in a bare host environment
-(subliminal/`srt` gate the corresponding sections and checks). All green in the
-Ubuntu container.
+196 tests total: unit, cli, runner, integration (real ffmpeg) plus a dedicated
+`test_censor.py` and censor coverage in scan/runner/cli. The `textual`,
+`faster_whisper` and `huggingface_hub` sections are skipped in a bare host
+environment (subliminal/`srt` gate the corresponding sections and checks). All
+green in the Ubuntu container.
 
 ## 11. Known notes
 
@@ -236,6 +242,106 @@ Select all/None/Invert reset them too. Selection now flips only `selected`.
   rows tall (top/bottom border box), which pushed the table off an 80x24
   screen. `border_top`-only rules render their `border_title` fine, so the
   separators cost one line each instead of two.
+
+## Textual key priority
+
+A focused `DataTable` binds `enter` to `select_cursor`. Textual hands a key to
+the focused widget *before* the screen binding is considered, so
+`Binding("enter", "start_run", "run")` never fired — the table ate the key.
+`App._check_bindings(key, priority=True)` runs before the key is forwarded, and
+`reversed(screen._binding_chain)` puts the app/screen first, so the screen
+binding needs `priority=True`. It is now
+`Binding("enter", "start_run", "run", priority=True)`.
+
+## Screen stack reuse
+
+`ScanScreen._finished` pushed a `SelectScreen`, and *Rescan* pushed another
+`ScanScreen` on top of it, so the stack grew with every rescan and the buried
+screens were unreachable. The scan screen is reused now: *Rescan* pops back to
+it, and `ScanScreen.on_screen_resume` re-enables the (otherwise permanently
+disabled) Scan button and clears the status line.
+
+## Selection is the run set
+
+`selected` says *which files run*, `want_subtitle`/`want_audio`/`want_censor`
+say *what runs on them*. Toggling a job flag used to set `selected` as well, so
+a stray `s` silently added the file to the run set and ran its other flagged
+jobs too. The flag toggles no longer touch the selection; a flag on an
+unselected row is reported instead. The bulk toggle still selects the rows it
+touches when it falls back to "every visible row" — otherwise the change would
+have no effect at all.
+
+`Start` used to run the *visible* selected rows only, so a row hidden by the
+filter was silently skipped. The run set is now every selected, actionable row
+in the result, and the status line reports how many selected rows the filter
+hides.
+
+## Wildcard search
+
+The scan result can be narrowed without rescanning. `scan.match_pattern`
+implements the semantics once: fnmatch globs (`*`, `?`, `[seq]`), compared
+lowercase on both sides (case-insensitive on Linux and Windows alike), matched
+against the file name *and* the normalised full path; a pattern with no wildcard
+is wrapped in `*...*`, so typing `star` finds `Star.Wars.mkv`.
+`filter_by_pattern` applies it and returns a new list.
+
+The TUI adds a one-line `SearchInput` to the filter block and binds `/`.
+`Input.Changed` rebuilds the table live; `Input.Submitted` (enter) hands focus
+back to the table, and the input's own escape binding clears the pattern and
+does the same. The pattern is ANDed with the `f` filter.
+
+Screen bindings cannot simply stay enabled while the box has focus: the priority
+`enter` binding is checked before the focused widget, and the single-letter
+bindings would otherwise swallow typed text. `SelectScreen.check_action` returns
+`None` (disabled, greyed in the footer) for every screen action while the search
+box is focused, so `_check_bindings` falls through to the input.
+
+Because it is only a view filter, a row selected before searching stays in the
+run set and `Start` still runs it. The same matcher backs `--match` on `scan`
+and `apply`; `apply` filters before `_select`, so rows outside the pattern are
+never mutated.
+
+## Model cache check without huggingface_hub
+
+`huggingface_hub` computes `HF_HOME`/`HF_HUB_CACHE`/`HF_TOKEN_PATH` at import
+time, so the cache check could not run before the library was installed — the
+exact moment the check matters. `mediafix/cache.py` resolves the three paths
+the same way the library does (`$HF_HOME`, else `$XDG_CACHE_HOME/huggingface`,
+else `~/.cache/huggingface`; `$HF_HUB_CACHE`, else `$HF_HOME/hub`; token at
+`$HF_HOME/token`) and falls back to that when the library is missing. Both
+`SubtitleEngine._check_cache()` and the `selftest` `[cache]` section use it, so
+a relative or unwritable `HF_HOME` is reported before any download starts.
+
+## Scan cache and sidecars
+
+The ffprobe cache stored the sidecar list together with the probe result. A
+sidecar is a separate file, so writing `Movie.eng.srt` changes neither the
+video's size nor its mtime — the cached entry kept reporting the file as
+missing subtitles. Only the ffprobe payload is cached now; the sidecars are
+re-read on every scan. To keep that cheap, `DirectoryIndex` lists each directory
+once per scan and shares the listing between the files in it.
+
+## Cancelled downmix
+
+The vendor's `process_one` replaced the original as soon as ffmpeg was done, so
+a cancel during the ffmpeg run still published the (possibly half written)
+result. The vendor now takes an optional `args.cancel_check` hook: it is
+polled before the run starts, while ffmpeg is running (the process is killed)
+and once more right before the replace. A cancelled run removes the temp file
+and returns `STATUS_CANCELLED`; the original stays as it was. `mediafix/downmix.py`
+passes the runner's cancel event through and the runner maps the new status to
+`JOB_CANCELLED`.
+
+## CLI options that were accepted and ignored
+
+- `scan --only` was parsed but never applied; it now restricts the reported
+  files to the requested kind of problem.
+- `scan/apply --cache` was parsed but never reached the config; it now sets
+  `cache_path`.
+- `--config` only worked *before* the subcommand, because the subparser's
+  default (`None`) overwrote the value the top level parser had stored. The
+  subparsers now use `default=argparse.SUPPRESS`, so both positions work and
+  neither clobbers the other.
 
 ## 12. Build commands
 

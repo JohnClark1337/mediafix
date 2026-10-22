@@ -171,6 +171,12 @@ class Runner:
     # ------------------------------------------------------------------
 
     def _run_subtitle(self, job: Job, engine) -> None:
+        if self.dry_run:
+            # A dry run must not touch the library: writing the sidecar is the
+            # whole point of this job.
+            self._emit(job, JOB_SKIPPED, "dry-run: would transcribe subtitles")
+            self._sub_outcome[job.path] = (True, "dry-run")
+            return
         self._emit(job, JOB_RUNNING, "starting")
         try:
             result = sub_mod.run_subtitle_job(
@@ -209,12 +215,24 @@ class Runner:
             self._emit(job, JOB_CANCELLED, "cancelled")
             self._finish_gate(job.path, False, "cancelled")
             return
+        if self.dry_run:
+            # The censor rewrites the media file in place, so a dry run has to
+            # stop here. The gate is released so the downmix can proceed.
+            self._emit(job, JOB_SKIPPED, "dry-run: would add a censored track")
+            self._finish_gate(job.path, True, "dry-run")
+            return
         self._emit(job, JOB_RUNNING, "starting")
-        result = censor_mod.run_censor_job(
-            engine, job.item, self.config,
-            progress=lambda fraction, message, _job=job: self._emit(_job, progress=fraction, message=message),
-            cancel=self.cancel_event,
-        )
+        try:
+            result = censor_mod.run_censor_job(
+                engine, job.item, self.config,
+                progress=lambda fraction, message, _job=job: self._emit(_job, progress=fraction, message=message),
+                cancel=self.cancel_event,
+            )
+        except Exception as exc:  # noqa: BLE001 - per-file failures never crash the batch
+            error = f"{type(exc).__name__}: {exc}"
+            self._emit(job, JOB_FAILED, error)
+            self._finish_gate(job.path, False, f"failed: {error}")
+            return
         if result.cancelled:
             self._emit(job, JOB_CANCELLED, "cancelled")
             self._finish_gate(job.path, False, "cancelled")
@@ -284,6 +302,8 @@ class Runner:
         )
         if status == "failed":
             self._emit(job, JOB_FAILED, message)
+        elif status == "cancelled":
+            self._emit(job, JOB_CANCELLED, message)
         elif status == "skip-has-stereo":
             self._emit(job, JOB_SKIPPED, message)
         elif status in ("skip-no-audio", "unchanged"):
@@ -301,6 +321,44 @@ class Runner:
             return summary
 
         started = time.monotonic()
+        crashed: str | None = None
+        try:
+            try:
+                self._execute(on_ready)
+            except Exception as exc:  # noqa: BLE001 - a crash must never hang the caller
+                crashed = f"{type(exc).__name__}: {exc}"
+                self.events.put((None, "error", f"run failed: {crashed}", 0.0))
+
+            summary.elapsed = time.monotonic() - started
+            for job in self.jobs:
+                if job.state == JOB_QUEUED:
+                    if self._abort_reason:
+                        self._emit(job, JOB_SKIPPED, f"pipeline aborted: {self._abort_reason}")
+                    elif crashed:
+                        self._emit(job, JOB_FAILED, f"not run: {crashed}")
+                    else:
+                        self._emit(job, JOB_CANCELLED, "not run")
+            for job in self.jobs:
+                if job.state == JOB_DONE:
+                    summary.done += 1
+                elif job.state == JOB_FAILED:
+                    summary.failed += 1
+                    summary.failures.append((job.kind, job.label, job.message))
+                elif job.state == JOB_CANCELLED:
+                    summary.cancelled += 1
+                elif job.state == JOB_SKIPPED:
+                    summary.skipped += 1
+                else:
+                    summary.failed += 1
+                    summary.failures.append((job.kind, job.label, job.message or "did not run"))
+        finally:
+            # wait() must always return. A worker that raises used to leave this
+            # event unset, which hung the TUI and the CLI batch forever.
+            self._done.set()
+        return summary
+
+    def _execute(self, on_ready=None) -> None:
+        """Run the planned jobs. Raises only on a programming error."""
         args = downmix_mod.build_args(self.config, force=self.force, dry_run=self.dry_run)
 
         subtitle_jobs = [job for job in self.jobs if job.kind == KIND_SUBTITLE]
@@ -340,35 +398,16 @@ class Runner:
         try:
             if downmix_jobs:
                 futures = [pool.submit(self._downmix_job, job, args) for job in downmix_jobs]
-                for future in futures:
-                    future.result()
+                for job, future in zip(downmix_jobs, futures):
+                    # exception() instead of result(): one bad worker must not
+                    # abort the batch.
+                    error = future.exception()
+                    if error is not None and job.state not in TERMINAL_STATES:
+                        self._emit(job, JOB_FAILED, f"{type(error).__name__}: {error}")
         finally:
             pool.shutdown(wait=True)
             if cpu_thread is not None:
                 cpu_thread.join()
-
-        summary.elapsed = time.monotonic() - started
-        for job in self.jobs:
-            if job.state == JOB_QUEUED:
-                if self._abort_reason:
-                    self._emit(job, JOB_SKIPPED, f"pipeline aborted: {self._abort_reason}")
-                else:
-                    self._emit(job, JOB_CANCELLED, "not run")
-        self._done.set()
-        for job in self.jobs:
-            if job.state == JOB_DONE:
-                summary.done += 1
-            elif job.state == JOB_FAILED:
-                summary.failed += 1
-                summary.failures.append((job.kind, job.label, job.message))
-            elif job.state == JOB_CANCELLED:
-                summary.cancelled += 1
-            elif job.state == JOB_SKIPPED:
-                summary.skipped += 1
-            else:
-                summary.failed += 1
-                summary.failures.append((job.kind, job.label, job.message or "did not run"))
-        return summary
 
     def wait(self, timeout: float | None = None) -> bool:
         return self._done.wait(timeout)

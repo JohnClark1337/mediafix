@@ -82,6 +82,7 @@ STATUS_SKIP_STEREO = "skip-has-stereo"
 STATUS_NO_AUDIO = "skip-no-audio"
 STATUS_UNCHANGED = "unchanged"
 STATUS_FAILED = "failed"
+STATUS_CANCELLED = "cancelled"
 
 PAN_COEFFICIENTS = {
     "FL": (1.0, 0.0),
@@ -122,6 +123,10 @@ FALLBACK_CHANNELS = {
 
 class ToolError(Exception):
     pass
+
+
+class Cancelled(Exception):
+    """Raised when a cancel check asks the running work to stop."""
 
 
 class AudioStream(object):
@@ -207,14 +212,31 @@ def scan_for_files(paths, extensions, recursive=True):
     return found
 
 
-def run_capture(cmd):
-    proc = subprocess.run(
+def run_capture(cmd, cancel_check=None):
+    if cancel_check is None:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+        return proc
+    proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         universal_newlines=True,
     )
-    return proc
+    while True:
+        try:
+            out, err = proc.communicate(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            if cancel_check():
+                proc.kill()
+                proc.communicate()
+                raise Cancelled()
+            continue
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
 def probe_file(probe_path, file_path):
@@ -410,16 +432,16 @@ def resolve_output_path(src, base, output_dir, in_place):
     return dst, False
 
 
-def run_ffmpeg(cmd, verbose):
+def run_ffmpeg(cmd, verbose, cancel_check=None):
     if verbose:
         log.debug("Running: %s", subprocess.list2cmdline(cmd))
-    proc = run_capture(cmd)
+    proc = run_capture(cmd, cancel_check)
     if proc.returncode != 0:
         tail = "\n".join(proc.stderr.strip().splitlines()[-15:])
         raise RuntimeError("ffmpeg exited {}:\n{}".format(proc.returncode, tail))
 
 
-def remux_with_mkvmerge(mkvmerge, path, verbose):
+def remux_with_mkvmerge(mkvmerge, path, verbose, cancel_check=None):
     """Re-mux a matroska file through mkvmerge for VLC-friendly clusters/cues.
 
     ffmpeg's stream-copied matroska output occasionally produces cluster/cue
@@ -440,7 +462,7 @@ def remux_with_mkvmerge(mkvmerge, path, verbose):
     cmd = [mkvmerge, "-o", tmp, path]
     if verbose:
         log.debug("Running: %s", subprocess.list2cmdline(cmd))
-    proc = run_capture(cmd)
+    proc = run_capture(cmd, cancel_check)
     if proc.returncode != 0:
         try:
             os.remove(tmp)
@@ -523,6 +545,17 @@ class ProgressBar(object):
             pass
 
 
+def is_cancelled(args):
+    """Whether the caller asked for the work to stop."""
+    check = getattr(args, "cancel_check", None)
+    if check is None:
+        return False
+    try:
+        return bool(check())
+    except Exception:
+        return False
+
+
 def process_one(args, src, base):
     try:
         vf = analyze_file(src, args.ffprobe)
@@ -570,8 +603,18 @@ def process_one(args, src, base):
                 [args.mkvmerge, "-o", tmp, dst]))
         return src, base, STATUS_PROCESSED, "dry-run"
 
+    if is_cancelled(args):
+        return src, base, STATUS_CANCELLED, "cancelled before start"
+
     try:
-        run_ffmpeg(cmd, args.verbose)
+        run_ffmpeg(cmd, args.verbose, cancel_check=getattr(args, "cancel_check", None))
+    except Cancelled:
+        if is_temp and os.path.exists(dst):
+            try:
+                os.remove(dst)
+            except OSError:
+                pass
+        return src, base, STATUS_CANCELLED, "cancelled; original left untouched"
     except (RuntimeError, OSError) as exc:
         if is_temp and os.path.exists(dst):
             try:
@@ -582,7 +625,15 @@ def process_one(args, src, base):
 
     if args.remux and os.path.splitext(dst)[1].lower() in (".mkv", ".webm"):
         try:
-            remux_with_mkvmerge(args.mkvmerge, dst, args.verbose)
+            remux_with_mkvmerge(args.mkvmerge, dst, args.verbose,
+                                cancel_check=getattr(args, "cancel_check", None))
+        except Cancelled:
+            if os.path.exists(dst):
+                try:
+                    os.remove(dst)
+                except OSError:
+                    pass
+            return src, base, STATUS_CANCELLED, "cancelled; original left untouched"
         except (ToolError, RuntimeError, OSError) as exc:
             if os.path.exists(dst):
                 try:
@@ -592,6 +643,21 @@ def process_one(args, src, base):
             return src, base, STATUS_FAILED, str(exc)
 
     if is_temp:
+        if is_cancelled(args):
+            # The original is only replaced once the work is known to be
+            # complete: a cancelled run must not leave a half finished file
+            # in place of the original.
+            try:
+                os.remove(dst)
+            except OSError:
+                pass
+            return src, base, STATUS_CANCELLED, "cancelled; original left untouched"
+        # The temp file is ffmpeg's, so it carries ffmpeg's mode. Copy the
+        # original's permissions over before it replaces it.
+        try:
+            os.chmod(dst, os.stat(src).st_mode & 0o7777)
+        except OSError:
+            pass
         try:
             os.replace(dst, src)
         except OSError as exc:

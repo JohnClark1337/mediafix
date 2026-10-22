@@ -131,11 +131,22 @@ The `--device` flag still accepts `cuda`; only the plumbing is gone.
 | `mediafix apply [paths...]` | Unattended repairs. |
 
 `scan` and `apply` take `--only sub|audio|censor|both`,
-`--filter all|sub|audio|both|censor|clean`, and `--limit N`. `apply` adds
-`--dry-run`, `--force`, and `-y`. All four accept `[paths...]`; when omitted, the
-root comes from `MEDIA_ROOT` (default `/media` in the container, else the current
-directory). `tui` deliberately omits `--filter`/`--only`/`--limit` because the UI
-drives those interactively.
+`--filter all|sub|audio|both|censor|clean`, `--match PATTERN`, and
+`--limit N`. `apply` adds `--dry-run`, `--force`, and `-y`. All four accept
+`[paths...]`; when omitted, the root comes from `MEDIA_ROOT` (default `/media`
+in the container, else the current directory). `tui` deliberately omits
+`--filter`/`--only`/`--limit` because the UI drives those interactively.
+
+`--match` is a wildcard search over the scan result: `*`, `?` and `[seq]`,
+case-insensitive, matched against both the file name and the full path. A
+pattern without wildcards is a substring search (`star` means `*star*`). It is
+applied after `--filter`/`--only` and before `--limit`; `apply --match '*S01*'`
+only repairs matching files.
+
+`--config PATH` works before *and* after the subcommand (`mediafix --config c.toml
+scan` and `mediafix scan --config c.toml` are the same). `scan` and `apply` also
+take `--cache PATH` (where the ffprobe cache lives) and `--no-cache` (ignore it);
+without `--cache` the location comes from `cache_path` in `config.toml`.
 
 Engine flags (`--model`, `--device`, `--compute-type`, `--cpu-threads`,
 `--beam-size`, `--language`, `--translate`, `--audio-stream`, `--sidecar-ext`),
@@ -154,6 +165,7 @@ flags (`--swears`, `--bleeptool`, `--beep`, `--beep-mode`, `--pre-buffer`,
 | `s` / `a` / `c` | toggle subtitle / downmix / censorship for the highlighted file |
 | `S` / `A` / `C` | check or uncheck subtitle / downmix / censorship for the selected rows (every visible row when nothing is selected) |
 | `f` | cycle filter: all / sub / audio / both / censor / clean |
+| `/` | focus the search box: wildcards filter the list as you type (`enter` returns to the table, `esc` clears) |
 | `r` | toggle dry-run (same as the Dry run button) |
 | `enter` | start the run |
 | `esc` | back, or cancel a running job |
@@ -167,6 +179,20 @@ selected row already has it they uncheck it everywhere. Selection and job flags
 are independent — a flag you cleared stays cleared through space, Select
 all/None/Invert and refiltering. Flags only turn on for files that actually
 need the job; a toggle on a file that needs nothing changes nothing.
+
+The search box under the filter buttons narrows the list with shell-style
+wildcards (`*`, `?`, `[seq]`), matched case-insensitively against the file name
+and full path; plain text is a substring, so `star` finds `Star.Wars.mkv`. It is
+ANDed with the `f` filter, updates live while you type, and — like the `f`
+filter — only changes what is on screen.
+
+Picking a job never changes the selection: `selected` is the run set, the flags
+say what runs on it. A flag on a row you have not selected is not run, and the UI
+says so. `Start` runs **every selected row**, including the ones the current
+filter hides — the filter only changes what is on screen, it does not deselect
+anything. `enter` starts the run even while the file table has the focus. `esc`
+from the file list goes back to the scan screen, which is re-armed, so you can
+scan again without restarting the app.
 
 Each file row shows a `Sub`/`Aud`/`Cen` column: `want` (green) once picked,
 `miss` (yellow) when it needs work but is not picked, `-` (dim) when it needs
@@ -224,6 +250,10 @@ results are cached to JSON and invalidated when a file's size or mtime changes.
   and atomically replace it; the original is only overwritten after ffmpeg
   (+ mkvmerge, for downmixes) succeeds. Each file is preflighted for free space
   (file size + margin).
+- A cancelled downmix never replaces the original: ffmpeg is stopped, the half
+  written temp file is removed and the movie is left exactly as it was.
+- The original's permissions survive the replace; a temp file written by ffmpeg
+  does not inherit them.
 - Censor scratch audio lives in a per-job temp directory that is always removed,
   never next to the movie.
 - Every job failure is reported with a non-zero exit code.
@@ -243,10 +273,11 @@ results are cached to JSON and invalidated when a file's size or mtime changes.
 
 ```
 mediafix/            package (cli, scan, probe, srt, audio, subtitles,
-                     censor, downmix, runner, tui, selftest, config)
-audio_downmix.py     vendored downmix engine (audio stream title parsing and
-                     a censor_prefix hook are the only local changes)
-tests/               168 unit, cli, runner, and integration tests
+                     censor, downmix, runner, tui, selftest, config, cache)
+audio_downmix.py     vendored downmix engine (audio stream title parsing, a
+                     censor_prefix hook and a cancel hook are the only local
+                     changes)
+tests/               196 unit, cli, runner, and integration tests
 ```
 
 Run tests: `python -m unittest discover -s tests -v`.

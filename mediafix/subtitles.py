@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import threading
@@ -87,12 +86,9 @@ class SubtitleEngine:
         """
         import os
 
-        try:
-            from huggingface_hub import constants
-        except ImportError:
-            return  # older hub, or not installed yet; let the caller find out
+        from mediafix import cache as cache_mod
 
-        cache = constants.HF_HOME
+        cache = cache_mod.resolve_hf_home()
         if not os.path.isabs(cache):
             raise ModelCacheError(
                 f"HF_HOME is not an absolute path: {cache!r}. "
@@ -311,21 +307,33 @@ def search_and_save_sidecar(item, config, destination) -> Path | None:
     if existing is not None:
         return existing
 
-    temp_dir = Path(tempfile.mkdtemp(prefix="mediafix_search_"))
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    # The extracted subtitle is staged inside the destination directory: the
+    # rename has to stay on one filesystem. os.replace is rename(2), so moving
+    # it out of a temp dir fails with EXDEV when the media lives on a bind
+    # mount (/media) and the temp dir does not (/tmp).
+    handle = tempfile.NamedTemporaryFile(
+        dir=str(destination.parent), prefix=f".{destination.stem}.",
+        suffix=destination.suffix, delete=False,
+    )
+    handle.close()
+    embedded = Path(handle.name)
     try:
-        embedded = temp_dir / f"{Path(item.path).stem}.embedded.srt"
         ok, lang = extract_embedded_subtitle(item.path, config, embedded)
         if ok and (not lang or lang in {"und"} or probe_mod.is_english(lang)):
-            Path(destination).parent.mkdir(parents=True, exist_ok=True)
             os.replace(embedded, destination)
-            return Path(destination)
+            return destination
         if config.subtitle_search:
             text = download_subtitle_text(item.path, config)
             if text is not None:
                 srt_mod.write_atomic(destination, text)
-                return Path(destination)
+                return destination
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        try:
+            embedded.unlink()
+        except OSError:
+            pass
     return None
 
 
@@ -393,6 +401,10 @@ def run_subtitle_job(engine: SubtitleEngine, item, config,
         segments = engine.transcribe_file(item.path, item, progress=progress, cancel=cancel)
         cancelled = cancel is not None and cancel.is_set()
     except Exception as exc:  # noqa: BLE001 - report, never crash the batch
+        # A cancel during decoding raises AudioError("cancelled"). That is a
+        # cancellation, not a failure: it must not fail the batch.
+        if cancel is not None and cancel.is_set():
+            return SubtitleResult(str(destination), 0, language, 0.0, cancelled=True)
         error = f"{type(exc).__name__}: {exc}"
 
     if error:

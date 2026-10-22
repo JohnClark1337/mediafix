@@ -243,10 +243,18 @@ class SelectScreenInteractionTests(unittest.TestCase):
             await pilot.press("s")
             await pilot.pause()
             self.assertNotEqual(cells(0)[1], before[1], "'s' must repaint the Sub column")
+            self.assertEqual(
+                cells(0)[0], "[ ]",
+                "a job flag must not select the row: the selection is the run set",
+            )
 
             await pilot.press("s")
             await pilot.pause()
-            self.assertEqual(cells(0)[0], "[x]", "re-pressing 's' should select the row")
+            self.assertEqual(cells(0)[0], "[ ]", "the flag never changes the selection")
+
+            await pilot.press("space")
+            await pilot.pause()
+            self.assertEqual(cells(0)[0], "[x]", "space selects the row")
 
             await pilot.press("space")
             await pilot.pause()
@@ -452,6 +460,678 @@ class SelectFlagTests(unittest.TestCase):
             self.assertFalse(app.dry_run)
 
         self._run(body)
+
+
+class EnterStartsRunTests(unittest.TestCase):
+    """The enter key has to start the run even though the table has focus.
+
+    A focused DataTable binds "enter" to select_cursor, and the app hands a
+    key to the focused widget before the screen binding is looked at, so the
+    screen binding needs priority=True.
+    """
+
+    @staticmethod
+    def _items():
+        return [
+            scan_mod.MediaItem(
+                path="a.mkv", size=1, duration=1.0,
+                needs_subtitle=True, want_subtitle=True,
+                selected=True,
+            ),
+        ]
+
+    def _run(self, body):
+        import argparse
+        import queue
+
+        from mediafix import runner as runner_mod
+        from mediafix import tui as tui_mod
+
+        class FakeRunner:
+            def __init__(self, config, dry_run=False, force=False):
+                self.events = queue.Queue()
+
+            def plan(self, items):
+                self.items = items
+                return [runner_mod.Job(kind="sub", path=i.path, item=i) for i in items]
+
+            def wait(self, timeout=None):
+                return True
+
+            def run(self, on_ready=None):
+                return None
+
+            def cancel(self):
+                pass
+
+        async def main():
+            cfg = argparse.Namespace(
+                video_ext={".mkv"}, subtitle_ext={".srt"}, sub_language="eng",
+                ffprobe="ffprobe", cache_path=None, model="small",
+                device="cpu", compute_type="int8", jobs=2,
+                swears_path=None, censor_track_title="Censored (Bleeparr)",
+            )
+            app = tui_mod.MediaFixApp(config=cfg, roots=[])
+            app.result = scan_mod.ScanResult(roots=["."], items=self._items())
+            with unittest.mock.patch.object(tui_mod.runner_mod, "Runner", FakeRunner), \
+                 unittest.mock.patch.object(tui_mod.downmix_mod, "preflight", return_value=[]):
+                async with app.run_test() as pilot:
+                    await pilot.pause()
+                    app.push_screen(tui_mod.SelectScreen(app))
+                    await pilot.pause()
+                    await pilot.pause()
+                    await body(pilot, app.screen, app)
+
+        asyncio.run(main())
+
+    def test_enter_opens_the_run_screen(self):
+        async def body(pilot, screen, app):
+            from mediafix import tui as tui_mod
+
+            self.assertIsInstance(screen, tui_mod.SelectScreen)
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+            self.assertIsInstance(
+                app.screen, tui_mod.RunScreen,
+                "enter must start the run instead of only moving the table cursor",
+            )
+
+    def test_enter_binding_is_priority(self):
+        from mediafix import tui as tui_mod
+
+        binding = [
+            b for b in tui_mod.SelectScreen.BINDINGS
+            if getattr(b, "key", None) == "enter"
+        ]
+        self.assertTrue(binding, "the enter binding is missing")
+        self.assertTrue(
+            binding[0].priority,
+            "the enter binding must be priority, the focused table binds enter too",
+        )
+
+
+class FilterHidesSelectedRowsTests(unittest.TestCase):
+    """Start must not drop the rows the filter hides.
+
+    The filter only decides what is on screen. A selected row stays
+    selected, so the run set is every selected row - not every visible one.
+    """
+
+    @staticmethod
+    def _items():
+        return [
+            scan_mod.MediaItem(
+                path="visible.mkv", size=1, duration=1.0,
+                needs_subtitle=True, want_subtitle=True,
+                selected=True,
+            ),
+            scan_mod.MediaItem(
+                path="hidden.mkv", size=1, duration=1.0,
+                needs_subtitle=False, want_subtitle=False,
+                needs_censor=True, want_censor=True,
+                selected=True,
+            ),
+        ]
+
+    def _run(self, body):
+        import argparse
+        import queue
+
+        from mediafix import runner as runner_mod
+        from mediafix import tui as tui_mod
+
+        class FakeRunner:
+            def __init__(self, config, dry_run=False, force=False):
+                self.events = queue.Queue()
+
+            def plan(self, items):
+                return [runner_mod.Job(kind="sub", path=i.path, item=i) for i in items]
+
+            def wait(self, timeout=None):
+                return True
+
+            def run(self, on_ready=None):
+                return None
+
+            def cancel(self):
+                pass
+
+        async def main():
+            cfg = argparse.Namespace(
+                video_ext={".mkv"}, subtitle_ext={".srt"}, sub_language="eng",
+                ffprobe="ffprobe", cache_path=None, model="small",
+                device="cpu", compute_type="int8", jobs=2,
+                swears_path=None, censor_track_title="Censored (Bleeparr)",
+            )
+            app = tui_mod.MediaFixApp(config=cfg, roots=[])
+            app.result = scan_mod.ScanResult(roots=["."], items=self._items())
+            with unittest.mock.patch.object(tui_mod.runner_mod, "Runner", FakeRunner), \
+                 unittest.mock.patch.object(tui_mod.downmix_mod, "preflight", return_value=[]):
+                async with app.run_test() as pilot:
+                    await pilot.pause()
+                    app.push_screen(tui_mod.SelectScreen(app))
+                    await pilot.pause()
+                    await pilot.pause()
+                    await body(pilot, app.screen, app)
+
+        asyncio.run(main())
+
+    def test_start_runs_the_hidden_selected_rows_too(self):
+        async def body(pilot, screen, app):
+            from mediafix import tui as tui_mod
+
+            screen.mode = scan_mod.FILTER_SUB
+            screen._rebuild()
+            await pilot.pause()
+            self.assertEqual(
+                [i.path for i in screen.shown], ["visible.mkv"],
+                "the filter hides the second row",
+            )
+
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+            self.assertIsInstance(app.screen, tui_mod.RunScreen)
+            paths = sorted(i.path for i in app.screen.items)
+            self.assertEqual(
+                paths, ["hidden.mkv", "visible.mkv"],
+                "the selected row hidden by the filter must still be run",
+            )
+
+
+class WildcardSearchTests(unittest.TestCase):
+    """The search box filters the scan result and must not steal screen keys."""
+
+    @staticmethod
+    def _items():
+        return [
+            scan_mod.MediaItem(
+                path="alpha.mkv", size=1, duration=1.0,
+                needs_subtitle=True, needs_audio=True,
+                want_subtitle=True, want_audio=True,
+            ),
+            scan_mod.MediaItem(
+                path="beta.mkv", size=1, duration=1.0,
+                needs_subtitle=True, want_subtitle=True,
+            ),
+            scan_mod.MediaItem(
+                path="gamma.mkv", size=1, duration=1.0,
+                needs_audio=True, want_audio=True,
+            ),
+        ]
+
+    def _run(self, body):
+        import argparse
+        import queue
+
+        from mediafix import runner as runner_mod
+        from mediafix import tui as tui_mod
+
+        class FakeRunner:
+            def __init__(self, config, dry_run=False, force=False):
+                self.events = queue.Queue()
+
+            def plan(self, items):
+                return [runner_mod.Job(kind="sub", path=i.path, item=i) for i in items]
+
+            def wait(self, timeout=None):
+                return True
+
+            def run(self, on_ready=None):
+                return None
+
+            def cancel(self):
+                pass
+
+        async def main():
+            cfg = argparse.Namespace(
+                video_ext={".mkv"}, subtitle_ext={".srt"}, sub_language="eng",
+                ffprobe="ffprobe", cache_path=None, model="small",
+                device="cpu", compute_type="int8", jobs=2,
+                swears_path=None, censor_track_title="Censored (Bleeparr)",
+            )
+            app = tui_mod.MediaFixApp(config=cfg, roots=[])
+            app.result = scan_mod.ScanResult(roots=["."], items=self._items())
+            with unittest.mock.patch.object(tui_mod.runner_mod, "Runner", FakeRunner), \
+                 unittest.mock.patch.object(tui_mod.downmix_mod, "preflight", return_value=[]):
+                async with app.run_test() as pilot:
+                    await pilot.pause()
+                    app.push_screen(tui_mod.SelectScreen(app))
+                    await pilot.pause()
+                    await pilot.pause()
+                    await body(pilot, app.screen, app)
+
+        asyncio.run(main())
+
+    @staticmethod
+    async def _type(pilot, text):
+        for key in text:
+            await pilot.press(key)
+        await pilot.pause()
+
+    def test_slash_focuses_the_box_and_filters_as_you_type(self):
+        async def body(pilot, screen, app):
+            from textual.widgets import DataTable
+
+            from mediafix import tui as tui_mod
+
+            search = screen.query_one("#search-input", tui_mod.SearchInput)
+            self.assertFalse(search.has_focus)
+            await pilot.press("slash")
+            await pilot.pause()
+            self.assertTrue(search.has_focus, "'/' focuses the search box")
+
+            await self._type(pilot, "beta")
+            self.assertEqual(search.value, "beta")
+            self.assertEqual(screen.pattern, "beta")
+            self.assertEqual([i.name for i in screen.shown], ["beta.mkv"])
+            self.assertEqual(screen.query_one("#items", DataTable).row_count, 1)
+            self.assertIn("beta", str(screen.query_one("#items", DataTable).border_title))
+
+            alpha = app.result.items[0]
+            self.assertTrue(alpha.want_subtitle, "typed letters must not toggle flags")
+            self.assertTrue(alpha.want_audio, "typed letters must not toggle flags")
+            self.assertFalse(alpha.selected, "typed letters must not select rows")
+
+        self._run(body)
+
+    def test_typing_s_does_not_toggle_subtitles(self):
+        async def body(pilot, screen, app):
+            from mediafix import tui as tui_mod
+
+            alpha = app.result.items[0]
+            alpha.want_subtitle = False
+            await pilot.press("slash")
+            await pilot.press("s")
+            await pilot.pause()
+            search = screen.query_one("#search-input", tui_mod.SearchInput)
+            self.assertEqual(search.value, "s", "the letter belongs in the box")
+            self.assertFalse(alpha.want_subtitle, "the screen's 's' binding must be disabled")
+
+        self._run(body)
+
+    def test_enter_returns_to_the_table_and_keeps_the_pattern(self):
+        async def body(pilot, screen, app):
+            from textual.widgets import DataTable
+
+            from mediafix import tui as tui_mod
+
+            await pilot.press("slash")
+            await self._type(pilot, "beta")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertIsInstance(app.screen, tui_mod.SelectScreen)
+            self.assertEqual(screen.pattern, "beta")
+            self.assertEqual([i.name for i in screen.shown], ["beta.mkv"])
+            self.assertTrue(
+                screen.query_one("#items", DataTable).has_focus,
+                "enter in the box must not start the run; it returns to the table",
+            )
+
+        self._run(body)
+
+    def test_escape_clears_the_pattern_without_leaving_the_screen(self):
+        async def body(pilot, screen, app):
+            from textual.widgets import DataTable
+
+            from mediafix import tui as tui_mod
+
+            await pilot.press("slash")
+            await self._type(pilot, "beta")
+            self.assertEqual(screen.pattern, "beta")
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertIsInstance(app.screen, tui_mod.SelectScreen)
+            self.assertEqual(screen.pattern, "")
+            self.assertEqual(len(screen.shown), 3)
+            self.assertEqual(screen.query_one("#search-input", tui_mod.SearchInput).value, "")
+            self.assertTrue(screen.query_one("#items", DataTable).has_focus)
+
+        self._run(body)
+
+    def test_pattern_ands_with_the_mode_filter(self):
+        async def body(pilot, screen, app):
+            from textual.widgets import DataTable
+
+            screen.mode = scan_mod.FILTER_SUB
+            screen._rebuild()
+            await pilot.press("slash")
+            await self._type(pilot, "a")
+            self.assertEqual(
+                [i.name for i in screen.shown], ["alpha.mkv", "beta.mkv"],
+                "only sub rows whose name/path matches the pattern",
+            )
+            title = str(screen.query_one("#items", DataTable).border_title)
+            self.assertEqual(title, "sub  a - 2 of 3 files")
+
+        self._run(body)
+
+    def test_a_row_hidden_by_the_pattern_is_still_run(self):
+        async def body(pilot, screen, app):
+            from mediafix import tui as tui_mod
+
+            app.result.items[2].selected = True
+            await pilot.press("slash")
+            await self._type(pilot, "beta")
+            self.assertEqual([i.name for i in screen.shown], ["beta.mkv"])
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+            self.assertIsInstance(app.screen, tui_mod.RunScreen)
+            self.assertEqual([i.name for i in app.screen.items], ["gamma.mkv"])
+
+        self._run(body)
+
+
+class ScanScreenReuseTests(unittest.TestCase):
+    """Back from the file list returns to a usable scan screen.
+
+    The scan button used to stay disabled after the first scan, and every
+    rescan pushed another screen, so the stack grew and the buried screens
+    were unreachable.
+    """
+
+    def test_back_returns_to_a_rearmed_scan_screen(self):
+        import argparse
+
+        from textual.widgets import Button
+
+        from mediafix import tui as tui_mod
+
+        async def main():
+            cfg = argparse.Namespace(
+                video_ext={".mkv"}, subtitle_ext={".srt"}, sub_language="eng",
+                ffprobe="ffprobe", cache_path=None, model="small",
+                device="cpu", compute_type="int8", jobs=2,
+                swears_path=None, censor_track_title="Censored (Bleeparr)",
+            )
+            app = tui_mod.MediaFixApp(config=cfg, roots=[])
+            app.result = scan_mod.ScanResult(roots=["."], items=[])
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                scan_screen = app.screen
+                self.assertIsInstance(scan_screen, tui_mod.ScanScreen)
+                scan_screen.query_one("#scan-btn", Button).disabled = True
+
+                app.push_screen(tui_mod.SelectScreen(app))
+                await pilot.pause()
+                await pilot.pause()
+                self.assertIsInstance(app.screen, tui_mod.SelectScreen)
+
+                app.screen.action_back()
+                await pilot.pause()
+                await pilot.pause()
+                self.assertIs(app.screen, scan_screen, "back returns to the scan screen")
+                self.assertFalse(
+                    scan_screen.query_one("#scan-btn", Button).disabled,
+                    "the scan button has to be usable again",
+                )
+
+                # Rescan must not pile up another screen.
+                depth = len(app.screen_stack)
+                app.push_screen(tui_mod.SelectScreen(app))
+                await pilot.pause()
+                app.screen._rescan()
+                await pilot.pause()
+                await pilot.pause()
+                self.assertEqual(
+                    len(app.screen_stack), depth,
+                    "rescan must not grow the screen stack",
+                )
+
+        asyncio.run(main())
+
+
+class CancelledDownmixTests(unittest.TestCase):
+    """A cancelled downmix must leave the original file alone."""
+
+    @staticmethod
+    def _vendor():
+        import audio_downmix
+
+        return audio_downmix
+
+    def test_cancelled_run_keeps_the_original(self):
+        vendor = self._vendor()
+        from mediafix import config as config_mod
+        from mediafix import downmix as downmix_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "movie.mkv"
+            src.write_bytes(b"original bytes")
+            tmp_out = root / ".movie.tmp.mkv"
+
+            args = downmix_mod.build_args(config_mod.Config())
+            calls = {"n": 0}
+
+            def cancel_check():
+                calls["n"] += 1
+                # The first check happens before ffmpeg runs, the second one
+                # right before the original would be replaced.
+                return calls["n"] > 1
+
+            args.cancel_check = cancel_check
+
+            video = vendor.VideoFile(
+                str(src), None,
+                [vendor.AudioStream(0, "ac3", 6, "5.1", "eng")],
+                [],
+            )
+
+            def fake_run_ffmpeg(cmd, verbose, cancel_check=None):
+                tmp_out.write_bytes(b"half written")
+
+            def fake_remux(mkvmerge, path, verbose, cancel_check=None):
+                return path
+
+            with unittest.mock.patch.object(vendor, "analyze_file", return_value=video), \
+                 unittest.mock.patch.object(vendor, "run_ffmpeg", fake_run_ffmpeg), \
+                 unittest.mock.patch.object(vendor, "remux_with_mkvmerge", fake_remux), \
+                 unittest.mock.patch.object(
+                     vendor, "resolve_output_path", return_value=(str(tmp_out), True)):
+                _, _, status, message = vendor.process_one(args, str(src), None)
+
+            self.assertEqual(status, vendor.STATUS_CANCELLED)
+            self.assertEqual(src.read_bytes(), b"original bytes")
+            self.assertFalse(tmp_out.exists(), "the half written file must be removed")
+
+    def test_cancelled_before_start_keeps_the_original(self):
+        vendor = self._vendor()
+        from mediafix import config as config_mod
+        from mediafix import downmix as downmix_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "movie.mkv"
+            src.write_bytes(b"original bytes")
+
+            args = downmix_mod.build_args(config_mod.Config())
+            args.cancel_check = lambda: True
+
+            video = vendor.VideoFile(
+                str(src), None,
+                [vendor.AudioStream(0, "ac3", 6, "5.1", "eng")],
+                [],
+            )
+            with unittest.mock.patch.object(vendor, "analyze_file", return_value=video):
+                _, _, status, _message = vendor.process_one(args, str(src), None)
+
+            self.assertEqual(status, vendor.STATUS_CANCELLED)
+            self.assertEqual(src.read_bytes(), b"original bytes")
+
+    def test_runner_maps_the_cancelled_status(self):
+        from mediafix import runner as runner_mod
+
+        self.assertEqual(runner_mod.JOB_CANCELLED, "cancelled")
+
+
+class CliOptionTests(unittest.TestCase):
+    """Options that were accepted but ignored."""
+
+    def test_config_can_come_after_the_subcommand(self):
+        from mediafix import cli as cli_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_path = root / "config.toml"
+            config_path.write_text(
+                'model = "large"\n', encoding="utf-8"
+            )
+            media = root / "media"
+            media.mkdir()
+            (media / "a.mkv").write_bytes(b"x")
+
+            code = cli_mod.main([
+                "scan", "--config", str(config_path), "--json", str(media),
+            ])
+            self.assertEqual(code, cli_mod.EXIT_OK)
+
+    def test_config_before_the_subcommand_still_works(self):
+        from mediafix import cli as cli_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_path = root / "config.toml"
+            config_path.write_text('model = "large"\n', encoding="utf-8")
+            media = root / "media"
+            media.mkdir()
+            (media / "a.mkv").write_bytes(b"x")
+
+            code = cli_mod.main([
+                "--config", str(config_path), "scan", "--json", str(media),
+            ])
+            self.assertEqual(code, cli_mod.EXIT_OK)
+
+    def test_scan_honours_only(self):
+        from mediafix import cli as cli_mod
+
+        def fake_scan(roots, config, **kwargs):
+            sub = scan_mod.MediaItem(
+                path="sub.mkv", needs_subtitle=True, want_subtitle=True,
+            )
+            aud = scan_mod.MediaItem(
+                path="aud.mkv", needs_audio=True, want_audio=True,
+            )
+            return scan_mod.ScanResult(roots=list(roots), items=[sub, aud])
+
+        with tempfile.TemporaryDirectory() as td:
+            media = Path(td) / "media"
+            media.mkdir()
+            (media / "a.mkv").write_bytes(b"x")
+
+            with unittest.mock.patch.object(cli_mod.scan_mod, "scan", fake_scan):
+                import io
+                import contextlib
+
+                buffer = io.StringIO()
+                with contextlib.redirect_stdout(buffer):
+                    cli_mod.main(["scan", "--only", "sub", str(media)])
+            output = buffer.getvalue()
+            self.assertIn("sub.mkv", output)
+            self.assertNotIn("aud.mkv", output)
+
+    def test_scan_honours_match(self):
+        from mediafix import cli as cli_mod
+
+        def fake_scan(roots, config, **kwargs):
+            return scan_mod.ScanResult(roots=list(roots), items=[
+                scan_mod.MediaItem(
+                    path="/media/Star.Wars.S01E01.mkv", needs_subtitle=True,
+                ),
+                scan_mod.MediaItem(path="/media/Other.mp4", needs_audio=True),
+            ])
+
+        with tempfile.TemporaryDirectory() as td:
+            media = Path(td) / "media"
+            media.mkdir()
+            (media / "a.mkv").write_bytes(b"x")
+
+            with unittest.mock.patch.object(cli_mod.scan_mod, "scan", fake_scan):
+                import contextlib
+                import io
+
+                buffer = io.StringIO()
+                with contextlib.redirect_stdout(buffer):
+                    cli_mod.main(["scan", "--match", "*star*", str(media)])
+            output = buffer.getvalue()
+            self.assertIn("Star.Wars.S01E01.mkv", output)
+            self.assertNotIn("Other.mp4", output)
+
+    def test_apply_honours_match(self):
+        from mediafix import cli as cli_mod
+
+        def fake_scan(roots, config, **kwargs):
+            return scan_mod.ScanResult(roots=list(roots), items=[
+                scan_mod.MediaItem(
+                    path="/media/Star.Wars.S01E01.mkv",
+                    needs_subtitle=True, want_subtitle=True,
+                ),
+                scan_mod.MediaItem(
+                    path="/media/Other.mp4", needs_audio=True, want_audio=True,
+                ),
+            ])
+
+        seen = {}
+
+        def fake_batch(config, items, dry_run, force, assume_yes):
+            seen["paths"] = [i.path for i in items]
+            return cli_mod.EXIT_OK
+
+        with tempfile.TemporaryDirectory() as td:
+            media = Path(td) / "media"
+            media.mkdir()
+            (media / "a.mkv").write_bytes(b"x")
+
+            with unittest.mock.patch.object(cli_mod.scan_mod, "scan", fake_scan), \
+                 unittest.mock.patch.object(cli_mod, "_run_batch", fake_batch):
+                import contextlib
+                import io
+
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = cli_mod.main(["apply", "--match", "star", str(media)])
+            self.assertEqual(code, cli_mod.EXIT_OK)
+            self.assertEqual(seen["paths"], ["/media/Star.Wars.S01E01.mkv"])
+
+    def test_cache_option_reaches_the_config(self):
+        from mediafix import cli as cli_mod
+        from mediafix import config as config_mod
+
+        seen = {}
+
+        def fake_scan(roots, config, **kwargs):
+            seen["cache_path"] = config.cache_path
+            return scan_mod.ScanResult(roots=list(roots), items=[])
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            media = root / "media"
+            media.mkdir()
+            (media / "a.mkv").write_bytes(b"x")
+            cache = root / "probe-cache.json"
+
+            with unittest.mock.patch.object(cli_mod.scan_mod, "scan", fake_scan):
+                cli_mod.main(["scan", "--cache", str(cache), str(media)])
+
+            self.assertEqual(seen["cache_path"], str(cache))
+
+    def test_config_load_keeps_the_cache_path(self):
+        from mediafix import config as config_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_path = root / "config.toml"
+            config_path.write_text(
+                'cache_path = "%s"\n' % (root / "from-config.json").as_posix(),
+                encoding="utf-8",
+            )
+            config = config_mod.load(str(config_path), {})
+            self.assertEqual(
+                config.cache_path, (root / "from-config.json").as_posix()
+            )
 
 
 if __name__ == "__main__":

@@ -1,8 +1,10 @@
+import fnmatch
 import json
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from mediafix import probe as probe_mod
@@ -130,18 +132,27 @@ def walk(roots, extensions) -> list[str]:
     return found
 
 
-def find_sidecars(video_path, extensions) -> list[SidecarInfo]:
+def list_directory(directory: str) -> list[str]:
+    """Names of the files in *directory* (empty list when it cannot be read)."""
+    try:
+        with os.scandir(directory) as entries:
+            return sorted(entry.name for entry in entries if entry.is_file())
+    except OSError:
+        return []
+
+
+def sidecars_for(video_path, names, extensions) -> list[SidecarInfo]:
+    """Sidecars of *video_path* given the file names of its directory.
+
+    The names are passed in so a directory is listed once per scan instead of
+    once per video in it.
+    """
     video = Path(video_path)
     parent = video.parent
     stem = video.stem
     results: list[SidecarInfo] = []
-    try:
-        entries = list(parent.iterdir())
-    except OSError:
-        return results
-    for entry in entries:
-        if not entry.is_file():
-            continue
+    for name in names:
+        entry = parent / name
         if entry.suffix.lower() not in extensions:
             continue
         if entry.stem == stem:
@@ -165,6 +176,28 @@ def find_sidecars(video_path, extensions) -> list[SidecarInfo]:
     return results
 
 
+def find_sidecars(video_path, extensions) -> list[SidecarInfo]:
+    parent = Path(video_path).parent
+    return sidecars_for(video_path, list_directory(str(parent)), extensions)
+
+
+class DirectoryIndex:
+    """One directory listing per directory, shared by every file in it."""
+
+    def __init__(self):
+        self._names: dict[str, list[str]] = {}
+        self._lock = threading.Lock()
+
+    def names(self, directory: str) -> list[str]:
+        with self._lock:
+            cached = self._names.get(directory)
+        if cached is not None:
+            return cached
+        listing = list_directory(directory)
+        with self._lock:
+            return self._names.setdefault(directory, listing)
+
+
 def classify(path, info: MediaInfo, sidecars, sub_language: str,
              swears=None, censor_track_title: str = probe_mod.CENSOR_TRACK_TITLE) -> MediaItem:
     size = info.size
@@ -174,6 +207,9 @@ def classify(path, info: MediaInfo, sidecars, sub_language: str,
         except OSError:
             size = 0
     has_english_sidecar = any(s.is_english and not s.is_forced for s in sidecars)
+    # The generated-track prefix is a config value, so the probe result has to
+    # carry it before needs_audio is derived from it.
+    info = replace(info, censor_prefix=censor_track_title)
     item = MediaItem(
         path=str(path),
         size=size,
@@ -209,22 +245,27 @@ def classify(path, info: MediaInfo, sidecars, sub_language: str,
     return item
 
 
-def _encode(info: MediaInfo, sidecars) -> dict:
+def _encode(info: MediaInfo) -> dict:
+    """Cache payload for a probed file.
+
+    Only the ffprobe result is cached. The sidecar list is not: it lives next
+    to the video, so writing "Movie.eng.srt" does not change the video's size
+    or mtime and a cached entry would keep reporting the file as missing
+    subtitles.
+    """
     return {
         "size": info.size,
         "duration": info.duration,
         "error": info.error,
         "audio": [asdict(a) for a in info.audio],
         "subtitles": [asdict(s) for s in info.subtitles],
-        "sidecars": [asdict(s) for s in sidecars],
     }
 
 
-def _decode(data: dict) -> tuple[MediaInfo, list[SidecarInfo]]:
+def _decode(data: dict) -> MediaInfo:
     audio = [probe_mod.AudioStreamInfo(**a) for a in data.get("audio", [])]
     subs = [probe_mod.SubtitleStreamInfo(**s) for s in data.get("subtitles", [])]
-    sidecars = [SidecarInfo(**s) for s in data.get("sidecars", [])]
-    info = MediaInfo(
+    return MediaInfo(
         path=data.get("path", ""),
         size=int(data.get("size") or 0),
         duration=data.get("duration"),
@@ -232,7 +273,6 @@ def _decode(data: dict) -> tuple[MediaInfo, list[SidecarInfo]]:
         subtitles=subs,
         error=data.get("error"),
     )
-    return info, sidecars
 
 
 class ScanCache:
@@ -274,6 +314,7 @@ def scan(roots, config, jobs: int = 8, progress=None, use_cache: bool = True) ->
     paths = walk(roots, config.video_ext)
     result = ScanResult(roots=[str(r) for r in roots])
     cache = ScanCache(config.cache_path) if use_cache else None
+    index = DirectoryIndex()
     swear_matcher = censor_mod.load_swears(config.swears_path)
 
     def work(path: str) -> MediaItem:
@@ -285,12 +326,18 @@ def scan(roots, config, jobs: int = 8, progress=None, use_cache: bool = True) ->
 
         entry = cache.get(path, size, mtime) if cache else None
         if entry:
-            info, sidecars = _decode({**entry, "path": path})
+            info = _decode({**entry, "path": path})
         else:
             info = probe_mod.probe(path, config.ffprobe)
-            sidecars = find_sidecars(path, config.subtitle_ext)
             if cache:
-                cache.put(path, size, mtime, _encode(info, sidecars))
+                cache.put(path, size, mtime, _encode(info))
+        # Sidecars are always re-read: they are separate files and can appear
+        # or change without the video being touched.
+        sidecars = sidecars_for(
+            path,
+            index.names(os.path.dirname(path) or "."),
+            config.subtitle_ext,
+        )
         return classify(
             path, info, sidecars, config.sub_language,
             swears=swear_matcher,
@@ -327,6 +374,29 @@ def filter_items(items, mode: str) -> list[MediaItem]:
     if mode == FILTER_CLEAN:
         return [i for i in items if not i.needs_any]
     return list(items)
+
+
+def match_pattern(item: MediaItem, pattern: str) -> bool:
+    """Whether *item* matches a user-supplied wildcard pattern.
+
+    The pattern uses fnmatch syntax (*, ?, [seq]) and is matched against both
+    the file name and the full path, case-insensitively on every platform. A
+    pattern with no wildcard characters is a substring search, so typing
+    ``star`` finds ``Star.Wars.mkv`` without the user having to add stars.
+    """
+    pattern = (pattern or "").strip()
+    if not pattern:
+        return True
+    pattern = pattern.lower().replace("\\", "/")
+    if not any(char in pattern for char in "*?["):
+        pattern = f"*{pattern}*"
+    path = item.path.replace("\\", "/").lower()
+    return fnmatch.fnmatchcase(item.name.lower(), pattern) or fnmatch.fnmatchcase(path, pattern)
+
+
+def filter_by_pattern(items, pattern: str) -> list[MediaItem]:
+    """Filter *items* by :func:`match_pattern`; a blank pattern keeps everything."""
+    return [item for item in items if match_pattern(item, pattern)]
 
 
 def human_size(num: int) -> str:

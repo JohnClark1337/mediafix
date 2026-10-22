@@ -44,3 +44,6 @@ replace = false
 remux = true
 
 free_space_margin_gb = 2.0
+
+# Where the ffprobe cache is kept. Unset: no cache file is written.
+# cache_path = ".mediafix-cache.json"

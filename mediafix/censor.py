@@ -534,6 +534,20 @@ def _tail(stderr: str | None) -> str:
     return "\n".join((stderr or "").strip().splitlines()[-20:])
 
 
+def _copy_mode(source, target) -> None:
+    """Give *target* the permission bits of *source*.
+
+    The censored track is written to a temp file by ffmpeg and then renamed
+    over the original, so without this the library file silently ends up with
+    ffmpeg's (wider) default mode.
+    """
+    try:
+        mode = os.stat(source).st_mode & 0o7777
+        os.chmod(target, mode)
+    except OSError:
+        pass
+
+
 def _extract_clips(video_path, sections, config, clips_dir: Path,
                    cancel: threading.Event | None = None) -> list[str]:
     """Split each bad section into a mono, 16 kHz clip under *clips_dir*."""
@@ -626,8 +640,14 @@ _CONTAINER_FMT = {
 _KNOWN_STREAM_TYPES = {"video", "audio", "subtitle", "data", "attachment"}
 
 
-def _is_generated_track(stream) -> bool:
-    return stream["type"] == "audio" and stream["title"].startswith(CENSOR_TRACK_TITLE)
+def _is_generated_track(stream, prefix: str = CENSOR_TRACK_TITLE) -> bool:
+    """True for a track this tool wrote on an earlier run.
+
+    The prefix has to be the one from the config: a run that wrote
+    "Bleeped" must recognise its own track, otherwise every run appends
+    another censored track to the file.
+    """
+    return stream["type"] == "audio" and stream["title"].startswith(prefix)
 
 
 def _probe_media(video_file, ffprobe: str) -> dict:
@@ -728,15 +748,15 @@ def add_censored_audio_track(input_file, mute_points, config,
 
     media = _probe_media(input_file, config.ffprobe)
     streams = media["streams"]
-    generated = [s for s in streams if _is_generated_track(s)]
-    keep = [s for s in streams if not _is_generated_track(s)]
+    track_title = config.censor_track_title
+    generated = [s for s in streams if _is_generated_track(s, track_title)]
+    keep = [s for s in streams if not _is_generated_track(s, track_title)]
     audio_streams = [s for s in keep if s["type"] == "audio"]
     if not audio_streams:
         raise CensorError("no audio streams found; cannot build a censored track")
 
     container = _CONTAINER_FMT.get(media["format"], "matroska")
     targets = _select_audio_targets(audio_streams, config.censor_audio_langs)
-    track_title = config.censor_track_title
     multi = len(targets) > 1
 
     parts: list[str] = []
@@ -802,6 +822,10 @@ def add_censored_audio_track(input_file, mute_points, config,
             )
         raise CensorError(f"ffmpeg failed: {_tail(process.stderr)}")
 
+    # The temp file is ffmpeg's, so it carries ffmpeg's mode. Copy the
+    # original's permissions over before it replaces it, or the library ends
+    # up with different (usually wider) permissions than the user set.
+    _copy_mode(input_file, tmp_out)
     os.replace(tmp_out, str(input_file))
     message = (
         f"added {len(targets)} censored track(s) over {len(mute_points)} segment(s)"

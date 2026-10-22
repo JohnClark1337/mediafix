@@ -1,3 +1,4 @@
+import copy
 import os
 import sys
 import threading
@@ -36,6 +37,8 @@ def build_args(config, force: bool = False, dry_run: bool = False):
     # The vendor only derives these inside main(); process_one() reads them off args.
     args.remux = not args.no_remux
     args.censor_prefix = config.censor_track_title
+    # Optional hook the vendor polls to stop before it replaces the original.
+    args.cancel_check = None
     return args
 
 
@@ -140,7 +143,13 @@ def run_one(args, path, cancel: threading.Event | None = None,
         sampler.start()
 
     try:
-        _, _, status, message = vendor.process_one(args, target, None)
+        # A copy of the namespace: the jobs run in parallel and each one gets
+        # its own cancel hook.
+        vendor_args = copy.copy(args)
+        vendor_args.cancel_check = (
+            (lambda: cancel.is_set()) if cancel is not None else None
+        )
+        _, _, status, message = vendor.process_one(vendor_args, target, None)
     except Exception as exc:  # noqa: BLE001 - vendor raises varied types
         status, message = vendor.STATUS_FAILED, f"{type(exc).__name__}: {exc}"
     finally:

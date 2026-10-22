@@ -57,6 +57,10 @@ class MediaInfo:
     audio: list[AudioStreamInfo] = field(default_factory=list)
     subtitles: list[SubtitleStreamInfo] = field(default_factory=list)
     error: str | None = None
+    # Title prefix of a track this tool generated. It comes from the config,
+    # so it cannot be a constant: a run that wrote "Bleeped" has to exclude
+    # its own track from the "already has English stereo" check.
+    censor_prefix: str = CENSOR_TRACK_TITLE
 
     @property
     def has_english_subtitle(self) -> bool:
@@ -65,12 +69,12 @@ class MediaInfo:
     @property
     def has_english_stereo(self) -> bool:
         return any(
-            s.channels == 2 and s.is_english and not (s.title or "").startswith(CENSOR_TRACK_TITLE)
+            s.channels == 2 and s.is_english and not (s.title or "").startswith(self.censor_prefix)
             for s in self.audio
         )
 
-    def has_censored_track(self, prefix: str = CENSOR_TRACK_TITLE) -> bool:
-        return any((s.title or "").startswith(prefix) for s in self.audio)
+    def has_censored_track(self, prefix: str | None = None) -> bool:
+        return any((s.title or "").startswith(prefix or self.censor_prefix) for s in self.audio)
 
     @property
     def has_surround(self) -> bool:

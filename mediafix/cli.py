@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 import threading
+from dataclasses import replace
 from queue import Empty
 
 from mediafix import config as config_mod
@@ -12,6 +13,20 @@ from mediafix import selftest as selftest_mod
 EXIT_OK = 0
 EXIT_FAILURES = 1
 EXIT_USAGE = 2
+
+
+def _add_config_option(parser) -> None:
+    """Allow --config after the subcommand as well as before it.
+
+    SUPPRESS keeps the subparser from overwriting the value the top level
+    parser already stored: without it the subparser's default (None) wins and
+    "mediafix --config x scan" would silently lose the config.
+    """
+    parser.add_argument(
+        "--config",
+        default=argparse.SUPPRESS,
+        help="path to config.toml (can also be given before the subcommand)",
+    )
 
 
 def _add_engine_options(parser) -> None:
@@ -83,6 +98,9 @@ def _add_scan_options(parser) -> None:
     parser.add_argument("--only", choices=("sub", "audio", "censor", "both"),
                         help="restrict to one kind of problem")
     parser.add_argument("--filter", choices=scan_mod.FILTERS, default=scan_mod.FILTER_ALL)
+    parser.add_argument("--match",
+                        help="only files whose name or path matches this wildcard pattern "
+                             "(* ? [seq]; plain text is a substring)")
     parser.add_argument("--limit", type=int, help="process at most this many files")
 
 
@@ -134,6 +152,22 @@ def _print_scan(result, items, limit=None) -> None:
         print(f"  [{''.join(flags)}] {item.path}  ({status})")
     if limit is not None and len(items) > limit:
         print(f"  ... {len(items) - limit} more (use --limit 0 for all)")
+
+
+def _only_matches(item, only: str | None) -> bool:
+    """Whether *item* is affected by the kind of problem --only names.
+
+    "both" keeps every kind, the same way _select treats it.
+    """
+    if not only:
+        return True
+    if only == "sub":
+        return item.needs_subtitle
+    if only == "audio":
+        return item.needs_audio
+    if only == "censor":
+        return item.needs_censor
+    return True
 
 
 def _select(items, only: str) -> list:
@@ -258,11 +292,13 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="command")
 
     p_check = sub.add_parser("check", help="verify tools, ctranslate2 and model, then run downmix/censor roundtrips")
+    _add_config_option(p_check)
     p_check.add_argument("--skip-model", action="store_true", help="do not load the whisper model")
     p_check.add_argument("--skip-downmix", action="store_true", help="do not run the downmix roundtrip")
     p_check.add_argument("--skip-censor", action="store_true", help="do not run the censorship roundtrip")
 
     p_tui = sub.add_parser("tui", help="interactive terminal interface (default)")
+    _add_config_option(p_tui)
     # Only the path roots here: the TUI drives filtering/selection itself and
     # defining --filter/--only/--limit would collide with those bindings.
     p_tui.add_argument("paths", nargs="*", help="files or directories (searched recursively)")
@@ -271,12 +307,14 @@ def main(argv=None) -> int:
     _add_censor_options(p_tui)
 
     p_scan = sub.add_parser("scan", help="report what is missing without changing anything")
+    _add_config_option(p_scan)
     _add_scan_options(p_scan)
     p_scan.add_argument("--no-cache", action="store_true", help="ignore the ffprobe cache")
     p_scan.add_argument("--cache", help="path to the ffprobe cache file")
     p_scan.add_argument("--json", action="store_true", help="emit machine-readable json")
 
     p_apply = sub.add_parser("apply", help="run repairs non-interactively")
+    _add_config_option(p_apply)
     _add_scan_options(p_apply)
     _add_run_options(p_apply)
     _add_engine_options(p_apply)
@@ -295,6 +333,10 @@ def main(argv=None) -> int:
         )
 
     config = config_mod.load(args.config, _overrides(args))
+    # --cache points the scan at a specific cache file.
+    cache_path = getattr(args, "cache", None)
+    if cache_path:
+        config = replace(config, cache_path=cache_path)
     paths = _resolve_paths(args)
 
     if command == "scan":
@@ -306,6 +348,8 @@ def main(argv=None) -> int:
         )
         print("\r" + " " * 32 + "\r", end="")
         items = scan_mod.filter_items(result.items, args.filter)
+        items = [i for i in items if _only_matches(i, args.only)]
+        items = scan_mod.filter_by_pattern(items, args.match)
         if args.json:
             import json
 
@@ -322,7 +366,9 @@ def main(argv=None) -> int:
 
     if command == "apply":
         result = scan_mod.scan(paths, config, use_cache=not args.no_cache)
-        items = _select(scan_mod.filter_items(result.items, args.filter), args.only or "both")
+        items = scan_mod.filter_items(result.items, args.filter)
+        items = scan_mod.filter_by_pattern(items, args.match)
+        items = _select(items, args.only or "both")
         if args.limit:
             items = items[:args.limit]
         _print_scan(result, items)

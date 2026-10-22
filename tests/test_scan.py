@@ -307,6 +307,63 @@ class FilterTests(unittest.TestCase):
         self.assertEqual(self._paths("clean"), ["c.mkv"])
 
 
+class MatchPatternTests(unittest.TestCase):
+    """Wildcard search over an existing scan result."""
+
+    @staticmethod
+    def _items():
+        return [
+            scan_mod.MediaItem(path="/media/TV/Star.Wars.S01E01.mkv"),
+            scan_mod.MediaItem(path="/media/TV/Star.Wars.S01E02.mkv"),
+            scan_mod.MediaItem(path="/media/Movies/Other.mp4"),
+            scan_mod.MediaItem(path="/media/Movies/Planet.Earth.2006.mkv"),
+        ]
+
+    def _names(self, pattern):
+        return [i.name for i in scan_mod.filter_by_pattern(self._items(), pattern)]
+
+    def test_case_insensitive(self):
+        self.assertEqual(
+            self._names("*star*"),
+            ["Star.Wars.S01E01.mkv", "Star.Wars.S01E02.mkv"],
+        )
+
+    def test_plain_text_is_a_substring(self):
+        self.assertEqual(
+            self._names("star"),
+            ["Star.Wars.S01E01.mkv", "Star.Wars.S01E02.mkv"],
+        )
+        self.assertEqual(self._names("planet"), ["Planet.Earth.2006.mkv"])
+
+    def test_question_mark_and_character_class(self):
+        self.assertEqual(len(self._names("Star.Wars.S01E0?.mkv")), 2)
+        self.assertEqual(len(self._names("*S01E0[12]*")), 2)
+        self.assertEqual(self._names("*S01E0[2]*"), ["Star.Wars.S01E02.mkv"])
+
+    def test_extension_pattern(self):
+        self.assertEqual(self._names("*.mp4"), ["Other.mp4"])
+        self.assertEqual(len(self._names("*.mkv")), 3)
+
+    def test_matches_the_path_too(self):
+        self.assertEqual(self._names("*/movies/*.mkv"), ["Planet.Earth.2006.mkv"])
+
+    def test_windows_separators_are_normalised(self):
+        item = scan_mod.MediaItem(path=r"C:\media\TV\Star.Wars.S01E01.mkv")
+        self.assertTrue(scan_mod.match_pattern(item, r"c:\media\tv\star*"))
+        self.assertTrue(scan_mod.match_pattern(item, "*/tv/*"))
+
+    def test_blank_pattern_keeps_everything(self):
+        self.assertEqual(len(scan_mod.filter_by_pattern(self._items(), "")), 4)
+        self.assertEqual(len(scan_mod.filter_by_pattern(self._items(), "   ")), 4)
+
+    def test_combines_with_the_mode_filter(self):
+        items = self._items()
+        items[0].needs_subtitle = True
+        items[1].needs_audio = True
+        shown = scan_mod.filter_by_pattern(scan_mod.filter_items(items, "sub"), "wars")
+        self.assertEqual([i.name for i in shown], ["Star.Wars.S01E01.mkv"])
+
+
 class HumanTests(unittest.TestCase):
     def test_size(self):
         self.assertEqual(scan_mod.human_size(512), "512 B")
