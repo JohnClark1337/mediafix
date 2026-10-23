@@ -11,9 +11,11 @@ if str(_VENDOR_ROOT) not in sys.path:
 import audio_downmix as vendor  # noqa: E402
 
 is_english = vendor.is_english
+is_commentary_stream = vendor.is_commentary_stream
 has_english_stereo = vendor.has_english_stereo
 
 CENSOR_TRACK_TITLE = "Censored (Bleeparr)"
+STEREO_TRACK_TITLE = vendor.STEREO_TRACK_TITLE
 
 
 @dataclass(frozen=True)
@@ -25,7 +27,7 @@ class AudioStreamInfo:
     language: str = ""
     title: str = ""
     default: bool = False
-    voice: bool = False
+    commentary: bool = False
 
     @property
     def is_english(self) -> bool:
@@ -69,7 +71,10 @@ class MediaInfo:
     @property
     def has_english_stereo(self) -> bool:
         return any(
-            s.channels == 2 and s.is_english and not (s.title or "").startswith(self.censor_prefix)
+            s.channels == 2
+            and s.is_english
+            and not s.commentary
+            and not (s.title or "").startswith(self.censor_prefix)
             for s in self.audio
         )
 
@@ -77,12 +82,20 @@ class MediaInfo:
         return any((s.title or "").startswith(prefix or self.censor_prefix) for s in self.audio)
 
     @property
+    def has_generated_stereo(self) -> bool:
+        return any((s.title or "").strip() == STEREO_TRACK_TITLE for s in self.audio)
+
+    @property
     def has_surround(self) -> bool:
-        return any(s.is_surround for s in self.audio)
+        return any(s.is_surround and not s.commentary for s in self.audio)
 
     @property
     def has_audio(self) -> bool:
         return bool(self.audio)
+
+    @property
+    def has_non_commentary_audio(self) -> bool:
+        return any(not s.commentary for s in self.audio)
 
     @property
     def needs_audio(self) -> bool:
@@ -90,6 +103,9 @@ class MediaInfo:
 
     @property
     def primary_audio(self) -> AudioStreamInfo | None:
+        for stream in self.audio:
+            if not stream.commentary:
+                return stream
         return self.audio[0] if self.audio else None
 
 
@@ -116,7 +132,7 @@ def _to_media_info(path, size, data) -> MediaInfo:
                 language=language,
                 title=title,
                 default=default,
-                voice=bool((stream.get("tags") or {}).get("comment", "").lower().startswith("dialog")),
+                commentary=is_commentary_stream(stream),
             ))
             audio_relative += 1
         elif kind == "subtitle":

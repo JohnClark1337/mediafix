@@ -206,10 +206,10 @@ class ScanScreen(Screen):
         self.mediafix = mediafix
 
     def compose(self) -> ComposeResult:
-        root = self.mediafix.roots[0] if self.mediafix.roots else "/media"
+        root = self.mediafix.roots[0] if self.mediafix.roots else scan_mod.default_root()
         with Vertical(id="scan-box"):
             yield Label("Media library to scan", id="scan-title")
-            yield Input(value=root, placeholder="/media", id="root-input")
+            yield Input(value=root, placeholder=scan_mod.default_root(), id="root-input")
             yield Button("Scan", id="scan-btn", variant="primary")
             yield Static("", id="scan-status")
 
@@ -294,11 +294,17 @@ class SelectScreen(Screen):
     # Column labels, in the same order as SelectScreen._cells returns values.
     COLUMNS = ("Sel", "Sub", "Aud", "Cen", "Size", "Length", "File")
 
-    # Bulk flags: field -> (want attribute, needs attribute, label).
+    # Bulk flags: field -> (want, needs, redo-capable, force, label).
     BULK_FIELDS = {
-        "sub": ("want_subtitle", "needs_subtitle", "subtitles"),
-        "audio": ("want_audio", "needs_audio", "downmixes"),
-        "censor": ("want_censor", "needs_censor", "censoring"),
+        "sub": ("want_subtitle", "needs_subtitle", None, None, "subtitles"),
+        "audio": (
+            "want_audio", "needs_audio", "has_downmix", "force_audio",
+            "downmixes",
+        ),
+        "censor": (
+            "want_censor", "needs_censor", "has_censored", "force_censor",
+            "censoring",
+        ),
     }
 
     BINDINGS = [
@@ -420,11 +426,16 @@ class SelectScreen(Screen):
         return tuple(Text(label, style=styles.get(label, "")) for label in cls.COLUMNS)
 
     @staticmethod
-    def _flag(want: bool, needs: bool) -> Text:
+    def _flag(want: bool, needs: bool, has_redo: bool = False,
+              force: bool = False) -> Text:
+        if want and force:
+            return Text("redo", style="bold magenta")
         if want:
             return Text("want", style="bold green")
         if needs:
             return Text("miss", style="yellow")
+        if has_redo:
+            return Text("old", style="dim cyan")
         return Text("-", style="dim")
 
     @staticmethod
@@ -437,8 +448,14 @@ class SelectScreen(Screen):
         else:
             mark = Text("[x]", style="bold green") if item.selected else Text("[ ]", style="dim")
             sub = SelectScreen._flag(item.want_subtitle, item.needs_subtitle)
-            aud = SelectScreen._flag(item.want_audio, item.needs_audio)
-            cen = SelectScreen._flag(item.want_censor, item.needs_censor)
+            aud = SelectScreen._flag(
+                item.want_audio, item.needs_audio, item.has_downmix,
+                item.force_audio,
+            )
+            cen = SelectScreen._flag(
+                item.want_censor, item.needs_censor, item.has_censored,
+                item.force_censor,
+            )
             length = Text(human_duration(item.duration))
             name = Text(item.name)
         return (mark, sub, aud, cen, Text(human_size(item.size)), length, name)
@@ -512,21 +529,48 @@ class SelectScreen(Screen):
         item = self._current()
         if item is None or not item.selectable:
             return
-        key, needs_key, label = self.BULK_FIELDS[field]
-        if not getattr(item, needs_key):
-            # Clamp: a file that needs no such job can never carry the flag,
-            # but an existing flag can always be cleared.
+        key, needs_key, redo_key, force_key, label = self.BULK_FIELDS[field]
+        needs = getattr(item, needs_key)
+        can_redo = bool(redo_key and getattr(item, redo_key))
+        if can_redo and not needs:
+            forced = bool(getattr(item, force_key))
+            if forced:
+                setattr(item, key, False)
+                setattr(item, force_key, False)
+            else:
+                setattr(item, key, True)
+                setattr(item, force_key, True)
+                if not item.selected:
+                    self.notify(
+                        f"{label} redo flagged, but the row is not selected - "
+                        "press space to run it",
+                        severity="information",
+                    )
+            self._refresh(item)
+            return
+        if not needs:
+            # Clamp: a file that needs no such job can never carry a normal
+            # flag, but an existing flag (or redo) can always be cleared.
+            cleared = False
             if getattr(item, key):
                 setattr(item, key, False)
+                cleared = True
+            if force_key and getattr(item, force_key):
+                setattr(item, force_key, False)
+                cleared = True
+            if cleared:
                 self._refresh(item)
             else:
                 self.notify(f"this file needs no {label}", severity="information")
             return
-        setattr(item, key, not getattr(item, key))
+        turn_on = not getattr(item, key)
+        setattr(item, key, turn_on)
+        if force_key:
+            setattr(item, force_key, False)
         # A job flag never changes the selection: the selection is what the
         # user asked to run. Silently adding a file to the run set would run
         # its other flagged jobs too.
-        if getattr(item, key) and not item.selected:
+        if turn_on and not item.selected:
             self.notify(
                 f"{label} flagged, but the row is not selected - press space to run it",
                 severity="information",
@@ -553,7 +597,7 @@ class SelectScreen(Screen):
         return [i for i in self.shown if i.selectable], True
 
     def _toggle_job(self, field: str) -> None:
-        key, needs_key, label = self.BULK_FIELDS[field]
+        key, needs_key, redo_key, force_key, label = self.BULK_FIELDS[field]
         targets, fallback = self._bulk_targets()
         if not targets:
             self.notify("no rows to change", severity="warning")
@@ -561,13 +605,23 @@ class SelectScreen(Screen):
         if fallback:
             self.notify("nothing selected - applying to every visible row",
                         severity="information")
-        # Clamp: files that do not need the job never carry the flag.
+        # Clamp: files that neither need the job nor have a generated track
+        # never carry the flag.
         clamped = False
         for item in targets:
-            if not getattr(item, needs_key) and getattr(item, key):
-                setattr(item, key, False)
-                clamped = True
-        eligible = [i for i in targets if getattr(i, needs_key)]
+            can_redo = bool(redo_key and getattr(item, redo_key))
+            if not getattr(item, needs_key) and not can_redo:
+                if getattr(item, key):
+                    setattr(item, key, False)
+                    clamped = True
+                if force_key and getattr(item, force_key):
+                    setattr(item, force_key, False)
+                    clamped = True
+        eligible = [
+            i for i in targets
+            if getattr(i, needs_key)
+            or (redo_key and getattr(i, redo_key))
+        ]
         if not eligible:
             if clamped:
                 self._rebuild()
@@ -578,6 +632,14 @@ class SelectScreen(Screen):
         turn_on = any(not getattr(i, key) for i in eligible)
         for item in eligible:
             setattr(item, key, turn_on)
+            if force_key:
+                redo = bool(
+                    turn_on
+                    and redo_key
+                    and getattr(item, redo_key)
+                    and not getattr(item, needs_key)
+                )
+                setattr(item, force_key, redo)
             if turn_on and fallback:
                 # The fallback touched every visible row, most of which are
                 # not selected. Flags only run on selected rows, so they have
@@ -763,16 +825,26 @@ class RunScreen(Screen):
     @work(thread=True)
     def _batch(self) -> None:
         try:
-            for warning in downmix_mod.preflight(self.mediafix.config, force=self.mediafix.force):
-                self.app.call_from_thread(self._log, f"warning: {warning}")
-        except downmix_mod.ToolError as exc:
-            self.app.call_from_thread(self._abort, str(exc))
-            return
+            try:
+                for warning in downmix_mod.preflight(
+                    self.mediafix.config, force=self.mediafix.force
+                ):
+                    self.app.call_from_thread(self._log, f"warning: {warning}")
+            except downmix_mod.ToolError as exc:
+                self.app.call_from_thread(self._abort, str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001
+                self.app.call_from_thread(self._abort, str(exc))
+                return
 
-        summary = self.runner.run(
-            on_ready=lambda message: self.app.call_from_thread(self._log, message)
-        )
-        self.app.call_from_thread(self._record_summary, summary)
+            summary = self.runner.run(
+                on_ready=lambda message: self.app.call_from_thread(self._log, message)
+            )
+            self.app.call_from_thread(self._record_summary, summary)
+        finally:
+            # Guarantee the screen can always finish even if run() throws before
+            # emitting events.
+            self.app.call_from_thread(self._poll)
 
     def _log(self, message: str) -> None:
         try:

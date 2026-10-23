@@ -119,8 +119,7 @@ def _overrides(args) -> dict:
 def _resolve_paths(args) -> list[str]:
     paths = list(getattr(args, "paths", None) or [])
     if not paths:
-        env_root = os.environ.get("MEDIA_ROOT") or "/media"
-        paths = [env_root]
+        paths = [scan_mod.default_root()]
     missing = [p for p in paths if not os.path.exists(os.path.expanduser(p))]
     if missing:
         raise SystemExit(f"path not found: {', '.join(missing)}")
@@ -164,19 +163,25 @@ def _only_matches(item, only: str | None) -> bool:
     if only == "sub":
         return item.needs_subtitle
     if only == "audio":
-        return item.needs_audio
+        return item.needs_audio or item.has_downmix
     if only == "censor":
         return item.needs_censor
     return True
 
 
-def _select(items, only: str) -> list:
+def _select(items, only: str, force: bool = False) -> list:
     chosen = []
     for item in items:
         if not item.selectable:
             continue
+        redo_audio = bool(
+            force
+            and item.has_downmix
+            and not item.needs_audio
+            and only in ("audio", "both")
+        )
         want_sub = item.want_subtitle and only in ("sub", "both")
-        want_aud = item.want_audio and only in ("audio", "both")
+        want_aud = (item.want_audio or redo_audio) and only in ("audio", "both")
         want_cen = item.want_censor and only in ("censor", "both")
         if not (want_sub or want_aud or want_cen):
             continue
@@ -184,6 +189,7 @@ def _select(items, only: str) -> list:
         item.want_subtitle = want_sub
         item.want_audio = want_aud
         item.want_censor = want_cen
+        item.force_audio = redo_audio
         chosen.append(item)
     return chosen
 
@@ -340,35 +346,42 @@ def main(argv=None) -> int:
     paths = _resolve_paths(args)
 
     if command == "scan":
-        print(f"scanning {', '.join(paths)} ...", flush=True)
+        if not args.json:
+            print(f"scanning {', '.join(paths)} ...", flush=True)
+        progress = None
+        if not args.json:
+            progress = lambda done, total: print(  # noqa: E731
+                f"\r  probed {done}/{total}", end="", flush=True
+            )
         result = scan_mod.scan(
-            paths, config,
-            progress=lambda done, total: print(f"\r  probed {done}/{total}", end="", flush=True),
-            use_cache=not args.no_cache,
+            paths, config, progress=progress, use_cache=not args.no_cache,
         )
-        print("\r" + " " * 32 + "\r", end="")
+        if not args.json:
+            print("\r" + " " * 32 + "\r", end="")
         items = scan_mod.filter_items(result.items, args.filter)
         items = [i for i in items if _only_matches(i, args.only)]
         items = scan_mod.filter_by_pattern(items, args.match)
+        limit = args.limit or None
         if args.json:
             import json
 
+            shown = items if limit is None else items[:limit]
             print(json.dumps({
                 "roots": result.roots,
                 "needs_subtitle": result.needs_subtitle_count,
                 "needs_audio": result.needs_audio_count,
                 "needs_censor": result.needs_censor_count,
-                "files": [i.path for i in items],
+                "files": [i.path for i in shown],
             }, indent=2))
             return EXIT_OK
-        _print_scan(result, items, args.limit or None)
+        _print_scan(result, items, limit)
         return EXIT_OK
 
     if command == "apply":
         result = scan_mod.scan(paths, config, use_cache=not args.no_cache)
         items = scan_mod.filter_items(result.items, args.filter)
         items = scan_mod.filter_by_pattern(items, args.match)
-        items = _select(items, args.only or "both")
+        items = _select(items, args.only or "both", force=args.force)
         if args.limit:
             items = items[:args.limit]
         _print_scan(result, items)

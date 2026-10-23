@@ -76,6 +76,7 @@ log = logging.getLogger("audio_downmix")
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm"}
 
 DEFAULT_OUTPUT_DIR = "./nightmix_output"
+STEREO_TRACK_TITLE = "Nightmix Stereo"
 
 STATUS_PROCESSED = "processed"
 STATUS_SKIP_STEREO = "skip-has-stereo"
@@ -130,13 +131,15 @@ class Cancelled(Exception):
 
 
 class AudioStream(object):
-    def __init__(self, pos, codec, channels, layout, language="", title=""):
+    def __init__(self, pos, codec, channels, layout, language="", title="",
+                 commentary=False):
         self.pos = pos
         self.codec = codec
         self.channels = channels
         self.layout = layout
         self.language = language
         self.title = title
+        self.commentary = commentary
 
 
 class VideoFile(object):
@@ -261,13 +264,15 @@ def analyze_file(file_path, probe_path):
             channels = int(s.get("channels") or 0)
         except (TypeError, ValueError):
             channels = 0
+        tags = s.get("tags") or {}
         audio.append(AudioStream(
             pos=i,
             codec=str(s.get("codec_name") or ""),
             channels=channels,
             layout=str(s.get("channel_layout") or "").strip(),
-            language=str((s.get("tags") or {}).get("language") or "").strip(),
-            title=str((s.get("tags") or {}).get("title") or "").strip(),
+            language=str(tags.get("language") or "").strip(),
+            title=str(tags.get("title") or "").strip(),
+            commentary=is_commentary_stream(s),
         ))
     subtitle_codecs = [str(s.get("codec_name") or "") for s in subtitle_streams]
     return VideoFile(file_path, None, audio, subtitle_codecs)
@@ -295,10 +300,26 @@ def is_english(language):
     return lang in ("eng", "en", "english") or lang.split("-")[0] == "en"
 
 
+def is_commentary_stream(stream):
+    """Whether an ffprobe audio stream is a commentary track."""
+    if (stream.get("disposition") or {}).get("comment"):
+        return True
+    tags = stream.get("tags") or {}
+    for key in ("title", "comment", "description", "handler_name"):
+        if "commentary" in str(tags.get(key) or "").lower():
+            return True
+    return False
+
+
+def is_generated_stereo(stream):
+    return stream.title.strip() == STEREO_TRACK_TITLE
+
+
 def has_english_stereo(vf, censor_prefix=None):
     return any(
         s.channels == 2
         and is_english(s.language)
+        and not s.commentary
         and not (censor_prefix and s.title.startswith(censor_prefix))
         for s in vf.audio
     )
@@ -324,9 +345,9 @@ def build_pan(stream):
 
 
 def build_command(ffmpeg, src, dst, vf, enhance, voice, bitrate, replace, loudness=None,
-                  censor_prefix=None):
+                  censor_prefix=None, force=False):
     ext = os.path.splitext(dst)[1].lower()
-    targets = [s for s in vf.audio if needs_downmix(s)]
+    targets = [s for s in vf.audio if needs_downmix(s) and not s.commentary]
 
     # When a previous censorship pass left bleeparr surround tracks behind, the
     # stereo downmix must derive from the *censored* stream so the mutes carry
@@ -366,8 +387,12 @@ def build_command(ffmpeg, src, dst, vf, enhance, voice, bitrate, replace, loudne
         cmd += ["-map", labels[k]]
 
     original_map = []
-    if replace:
-        copies = [s for s in vf.audio if not needs_downmix(s)]
+    if force or replace:
+        copies = [
+            s for s in vf.audio
+            if (not needs_downmix(s) or force)
+            and not (force and is_generated_stereo(s))
+        ]
         for s in copies:
             cmd += ["-map", "0:a:%d" % s.pos]
             original_map.append(s.pos)
@@ -385,7 +410,7 @@ def build_command(ffmpeg, src, dst, vf, enhance, voice, bitrate, replace, loudne
             "-c:a:%d" % k, stereo_codec,
             "-b:a:%d" % k, stereo_bitrate,
             "-ac:a:%d" % k, "2",
-            "-metadata:s:a:%d" % k, "title=Nightmix Stereo",
+            "-metadata:s:a:%d" % k, "title=" + STEREO_TRACK_TITLE,
             "-metadata:s:a:%d" % k, "language=eng",
         ]
 
@@ -565,11 +590,14 @@ def process_one(args, src, base):
     if not vf.audio:
         return src, base, STATUS_NO_AUDIO, "No audio tracks"
 
-    targets = [s for s in vf.audio if needs_downmix(s)]
+    targets = [s for s in vf.audio if needs_downmix(s) and not s.commentary]
     if not targets:
         layouts = ", ".join(
-            "%s/%dch" % (s.codec or "?", s.channels) for s in vf.audio)
-        return src, base, STATUS_UNCHANGED, "No surround track found ({})".format(layouts)
+            "%s/%dch" % (s.codec or "?", s.channels) for s in vf.audio
+            if not s.commentary)
+        if not layouts:
+            return src, base, STATUS_UNCHANGED, "No non-commentary audio tracks"
+        return src, base, STATUS_UNCHANGED, "No non-commentary surround track found ({})".format(layouts)
 
     if has_english_stereo(vf, censor_prefix=getattr(args, "censor_prefix", None)) and not args.force:
         return src, base, STATUS_SKIP_STEREO, "Already has an English stereo track"
@@ -586,6 +614,7 @@ def process_one(args, src, base):
         replace=args.replace,
         loudness=args.loudness if args.loudnorm else None,
         censor_prefix=getattr(args, "censor_prefix", None),
+        force=args.force,
     )
 
     remux = args.remux and os.path.splitext(dst)[1].lower() in (".mkv", ".webm")

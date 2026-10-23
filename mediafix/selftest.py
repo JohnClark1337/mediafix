@@ -265,8 +265,10 @@ def check_censor_roundtrip(config) -> list[str]:
             raise CheckFailure(f"censorship roundtrip failed: {outcome.error or outcome.message}")
 
         info = probe(source, config.ffprobe)
-        if not info.has_censored_track(CENSOR_TRACK_TITLE):
-            raise CheckFailure("no 'Censored (Bleeparr)' audio track was added")
+        if not info.has_censored_track(config.censor_track_title):
+            raise CheckFailure(
+                f"no '{config.censor_track_title}' audio track was added"
+            )
         return [
             f"  censorship roundtrip: ok ({outcome.segments} mute segment(s), "
             f"{outcome.model_hits} whisper hit(s))"

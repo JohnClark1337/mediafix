@@ -144,7 +144,7 @@ class RealDownmixTests(unittest.TestCase):
         self.assertEqual(os.path.getsize(source), before)
         self.assertEqual(len(probe(source).audio), 1)
 
-    def test_force_adds_a_second_stereo_track(self):
+    def test_force_replaces_the_nightmix_track(self):
         source = self.root / "Movie.mkv"
         make_surround(source)
         args = downmix_mod.build_args(self.config)
@@ -154,7 +154,10 @@ class RealDownmixTests(unittest.TestCase):
         forced = downmix_mod.build_args(self.config, force=True)
         status, _ = downmix_mod.run_one(forced, str(source))
         self.assertEqual(status, "processed")
-        self.assertEqual(len(probe(source).audio), 3)
+        self.assertEqual(len(probe(source).audio), 2)
+        after = probe(source)
+        titles = [stream.title for stream in after.audio]
+        self.assertEqual(titles.count("Nightmix Stereo"), 1)
 
     def test_no_remux_path(self):
         source = self.root / "Movie.mkv"

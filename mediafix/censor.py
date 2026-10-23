@@ -32,7 +32,7 @@ from pathlib import Path
 from mediafix import downmix as downmix_mod
 from mediafix import srt as srt_mod
 from mediafix import subtitles as sub_mod
-from mediafix.probe import CENSOR_TRACK_TITLE
+from mediafix.probe import CENSOR_TRACK_TITLE, is_commentary_stream
 
 _MODEL_BY_TIER = {"S": "small.en", "M": "medium.en"}
 _CENSOR_TMP_SUFFIX = ".bleeparr-tmp"
@@ -551,11 +551,20 @@ def _copy_mode(source, target) -> None:
 def _extract_clips(video_path, sections, config, clips_dir: Path,
                    cancel: threading.Event | None = None) -> list[str]:
     """Split each bad section into a mono, 16 kHz clip under *clips_dir*."""
+    media = _probe_media(video_path, config.ffprobe)
+    audio_streams = [
+        s for s in media["streams"]
+        if s["type"] == "audio" and not s["commentary"]
+    ]
+    if not audio_streams:
+        raise CensorError("no non-commentary audio tracks")
+    target = _select_audio_targets(audio_streams, config.censor_audio_langs)[0]
     times = sorted({sec["start"] for sec in sections} | {sec["end"] for sec in sections})
     segment_times = ",".join(str(t) for t in times)
     result = _run_cmd([
         config.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
         "-i", str(video_path),
+        "-map", f"0:{target['index']}",
         "-vn", "-acodec", "pcm_s16le", "-ac", "1", "-ar", "16000",
         "-f", "segment", "-segment_times", segment_times,
         "-segment_start_number", "1",
@@ -682,15 +691,17 @@ def _probe_media(video_file, ffprobe: str) -> dict:
             "title": tags.get("title") or "",
             "channels": channels,
             "layout": stream.get("channel_layout") or f"{channels}ch",
+            "commentary": is_commentary_stream(stream),
         })
     return {"format": fmt, "streams": streams}
 
 
 def _select_audio_targets(audio_streams, langs: str) -> list[dict]:
     wanted = {tag.strip().lower() for tag in langs.split(",") if tag.strip()}
-    matched = [s for s in audio_streams if s["lang"] in wanted]
+    candidates = [s for s in audio_streams if not s.get("commentary")]
+    matched = [s for s in candidates if s["lang"] in wanted]
     if not matched:
-        matched = audio_streams[:1]
+        matched = candidates[:1]
     return matched
 
 
@@ -754,9 +765,12 @@ def add_censored_audio_track(input_file, mute_points, config,
     audio_streams = [s for s in keep if s["type"] == "audio"]
     if not audio_streams:
         raise CensorError("no audio streams found; cannot build a censored track")
+    censurable = [s for s in audio_streams if not s["commentary"]]
+    if not censurable:
+        raise CensorError("no non-commentary audio tracks; cannot build a censored track")
 
     container = _CONTAINER_FMT.get(media["format"], "matroska")
-    targets = _select_audio_targets(audio_streams, config.censor_audio_langs)
+    targets = _select_audio_targets(censurable, config.censor_audio_langs)
     multi = len(targets) > 1
 
     parts: list[str] = []
@@ -871,6 +885,10 @@ def _run_censor_job(engine, item, config, progress=None,
     shortage = downmix_mod.check_space(item.path, item.size, config.free_space_margin_gb)
     if shortage:
         return CensorResult(item.path, error=shortage)
+    if item.audio and not any(not stream.commentary for stream in item.audio):
+        return CensorResult(
+            item.path, skipped=True, message="no non-commentary audio tracks"
+        )
 
     if progress:
         progress(0.0, "loading swear list")

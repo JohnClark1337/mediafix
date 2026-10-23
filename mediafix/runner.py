@@ -1,3 +1,4 @@
+import copy
 import os
 import threading
 import time
@@ -31,6 +32,7 @@ class Job:
     state: str = JOB_QUEUED
     message: str = ""
     progress: float = 0.0
+    force: bool = False
     started: float | None = None
     finished: float | None = None
 
@@ -87,9 +89,9 @@ class Runner:
             if item.want_subtitle:
                 jobs.append(Job(KIND_SUBTITLE, item.path, item))
             if item.want_censor:
-                jobs.append(Job(KIND_CENSOR, item.path, item))
+                jobs.append(Job(KIND_CENSOR, item.path, item, force=item.force_censor))
             if item.want_audio:
-                jobs.append(Job(KIND_DOWNMIX, item.path, item))
+                jobs.append(Job(KIND_DOWNMIX, item.path, item, force=item.force_audio))
         self.jobs = jobs
         return jobs
 
@@ -200,6 +202,10 @@ class Runner:
             self._emit(job, JOB_CANCELLED, "cancelled")
             self._sub_outcome[job.path] = (False, "cancelled")
             return
+        if result.skipped:
+            self._emit(job, JOB_SKIPPED, result.message or "nothing to transcribe")
+            self._sub_outcome[job.path] = (True, "skipped")
+            return
         message = result.message or f"{result.segments} cues -> {os.path.basename(result.path)}"
         self._emit(job, JOB_DONE, message)
         self._sub_outcome[job.path] = (True, "ok")
@@ -221,7 +227,7 @@ class Runner:
             self._emit(job, JOB_SKIPPED, "dry-run: would add a censored track")
             self._finish_gate(job.path, True, "dry-run")
             return
-        self._emit(job, JOB_RUNNING, "starting")
+        self._emit(job, JOB_RUNNING, "starting redo" if job.force else "starting")
         try:
             result = censor_mod.run_censor_job(
                 engine, job.item, self.config,
@@ -292,9 +298,12 @@ class Runner:
             self._emit(job, JOB_FAILED, shortage)
             return
 
-        self._emit(job, JOB_RUNNING, "starting")
+        job_args = copy.copy(args)
+        if job.force:
+            job_args.force = True
+        self._emit(job, JOB_RUNNING, "starting redo" if job.force else "starting")
         status, message = downmix_mod.run_one(
-            args, job.path, cancel=self.cancel_event,
+            job_args, job.path, cancel=self.cancel_event,
             progress=lambda fraction, note, _job=job: self._emit(
                 _job, progress=fraction, message=f"{note or 'processing'}"
             ),

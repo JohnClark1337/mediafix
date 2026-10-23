@@ -23,6 +23,8 @@ FILTER_CENSOR = "censor"
 FILTER_CLEAN = "clean"
 FILTERS = (FILTER_ALL, FILTER_SUB, FILTER_AUDIO, FILTER_BOTH, FILTER_CENSOR, FILTER_CLEAN)
 
+PROBE_CACHE_VERSION = 2
+
 
 @dataclass(frozen=True)
 class SidecarInfo:
@@ -43,11 +45,15 @@ class MediaItem:
     needs_subtitle: bool = False
     needs_audio: bool = False
     needs_censor: bool = False
+    has_downmix: bool = False
+    has_censored: bool = False
     selectable: bool = True
     selected: bool = False
     want_subtitle: bool = False
     want_audio: bool = False
     want_censor: bool = False
+    force_audio: bool = False
+    force_censor: bool = False
     error: str | None = None
 
     @property
@@ -99,6 +105,16 @@ class ScanResult:
     @property
     def failed_count(self) -> int:
         return sum(1 for i in self.items if i.error)
+
+
+def default_root() -> str:
+    """Library root used when the user did not supply one."""
+    env_root = os.environ.get("MEDIA_ROOT")
+    if env_root:
+        return env_root
+    if os.name == "posix" and os.path.isdir("/media"):
+        return "/media"
+    return "."
 
 
 def _is_skipped_dir(name: str) -> bool:
@@ -228,9 +244,11 @@ def classify(path, info: MediaInfo, sidecars, sub_language: str,
         return item
     item.needs_subtitle = not info.has_english_subtitle and not has_english_sidecar
     item.needs_audio = info.needs_audio
+    item.has_downmix = info.has_generated_stereo
+    item.has_censored = info.has_censored_track(censor_track_title)
     if swears is None:
         item.needs_censor = False
-    elif info.has_censored_track(censor_track_title):
+    elif item.has_censored:
         item.needs_censor = False
     elif has_english_sidecar:
         sidecar = next((s.path for s in sidecars if s.is_english and not s.is_forced), None)
@@ -238,7 +256,7 @@ def classify(path, info: MediaInfo, sidecars, sub_language: str,
         item.needs_censor = sniff is not False
     else:
         item.needs_censor = True
-    item.selectable = item.needs_any
+    item.selectable = item.needs_any or item.has_downmix or item.has_censored
     item.want_subtitle = item.needs_subtitle
     item.want_audio = item.needs_audio
     item.want_censor = item.needs_censor
@@ -254,6 +272,7 @@ def _encode(info: MediaInfo) -> dict:
     subtitles.
     """
     return {
+        "version": PROBE_CACHE_VERSION,
         "size": info.size,
         "duration": info.duration,
         "error": info.error,
@@ -289,6 +308,8 @@ class ScanCache:
     def get(self, path, size, mtime):
         entry = self.entries.get(path)
         if not entry:
+            return None
+        if int(entry.get("version") or 1) != PROBE_CACHE_VERSION:
             return None
         if int(entry.get("size") or -1) != int(size) or float(entry.get("mtime") or -1) != float(mtime):
             return None
@@ -366,11 +387,11 @@ def filter_items(items, mode: str) -> list[MediaItem]:
     if mode == FILTER_SUB:
         return [i for i in items if i.needs_subtitle]
     if mode == FILTER_AUDIO:
-        return [i for i in items if i.needs_audio]
+        return [i for i in items if i.needs_audio or i.has_downmix]
     if mode == FILTER_BOTH:
         return [i for i in items if i.needs_subtitle and i.needs_audio]
     if mode == FILTER_CENSOR:
-        return [i for i in items if i.needs_censor]
+        return [i for i in items if i.needs_censor or i.has_censored]
     if mode == FILTER_CLEAN:
         return [i for i in items if not i.needs_any]
     return list(items)

@@ -41,6 +41,7 @@ class SubtitleResult:
     language: str
     duration: float
     cancelled: bool = False
+    skipped: bool = False
     error: str | None = None
     fatal: bool = False
     message: str = ""
@@ -385,6 +386,12 @@ def run_subtitle_job(engine: SubtitleEngine, item, config,
                 str(destination), _cue_count(found), language, 0.0,
                 message=f"subtitles saved: {found.name}",
             )
+
+    if item.audio and not any(not stream.commentary for stream in item.audio):
+        return SubtitleResult(
+            str(destination), 0, language, 0.0, skipped=True,
+            message="no non-commentary audio tracks",
+        )
 
     try:
         engine.load()

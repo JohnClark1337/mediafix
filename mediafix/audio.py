@@ -73,16 +73,16 @@ def pick_audio_stream(info, preferred: int | None = None) -> int:
         if 0 <= preferred < len(info.audio):
             return preferred
         raise AudioError(f"audio stream {preferred} out of range, file has {len(info.audio)}")
-    for candidate in info.audio:
-        if candidate.is_english and not candidate.is_surround and not candidate.voice:
+    candidates = [stream for stream in info.audio if not stream.commentary]
+    if not candidates:
+        raise AudioError("file has only commentary audio tracks")
+    for candidate in candidates:
+        if candidate.is_english and not candidate.is_surround:
             return candidate.index
-    for candidate in info.audio:
-        if candidate.default and not candidate.voice:
+    for candidate in candidates:
+        if candidate.default:
             return candidate.index
-    for candidate in info.audio:
-        if not candidate.voice:
-            return candidate.index
-    return info.audio[0].index
+    return candidates[0].index
 
 
 def iter_chunks(samples, chunk_seconds: int = 600, overlap_seconds: int = 2):
