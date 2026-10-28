@@ -818,6 +818,33 @@ def add_censored_audio_track(input_file, mute_points, config,
             f"cens{j}",
         )
         parts.extend(sub_parts)
+        if _needs_downmix_censor(stream):
+            split_label = f"{label}_split"
+            # split so the censored surround track can be mapped directly
+            # and also fed into the downmix
+            parts.append(f"{label}asplit=2[{label}][{split_label}]")
+            st_parts, st_label = _censored_stereo_filter(
+                f"[{split_label}]", f"cens{j}_st", stream
+            )
+            parts.extend(st_parts)
+            added_tracks.append({
+                "label": label,
+                "stream": stream,
+                "title_base": track_title if not multi else f"{track_title} ({stream['layout']})",
+                "is_stereo_extra": False,
+                "default": track_counter == 0,
+            })
+            # Replace the first added track's label with the split output
+            added_tracks[-2]["label"] = label
+            added_tracks.append({
+                "label": st_label,
+                "stream": stream,
+                "title_base": f"{track_title} (Stereo)",
+                "is_stereo_extra": True,
+                "default": False,
+            })
+            track_counter += 1
+            continue
         added_tracks.append({
             "label": label,
             "stream": stream,
@@ -826,17 +853,7 @@ def add_censored_audio_track(input_file, mute_points, config,
             "default": track_counter == 0,
         })
         track_counter += 1
-        if _needs_downmix_censor(stream):
-            st_parts, st_label = _censored_stereo_filter(label, f"cens{j}_st", stream)
-            parts.extend(st_parts)
-            added_tracks.append({
-                "label": st_label,
-                "stream": stream,
-                "title_base": f"{track_title} (Stereo)",
-                "is_stereo_extra": True,
-                "default": track_counter == 0,
-            })
-            track_counter += 1
+    filter_complex = ";".join(parts) if parts else None
     filter_complex = ";".join(parts) if parts else None
 
     tmp_out = os.path.join(
