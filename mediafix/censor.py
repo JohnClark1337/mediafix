@@ -819,23 +819,23 @@ def add_censored_audio_track(input_file, mute_points, config,
         )
         parts.extend(sub_parts)
         if _needs_downmix_censor(stream):
-            split_label = f"{label}_split"
-            # split so the censored surround track can be mapped directly
-            # and also fed into the downmix
-            parts.append(f"{label}asplit=2[{label}][{split_label}]")
+            base_name = label.strip()
+            if base_name.startswith("[") and base_name.endswith("]"):
+                base_name = base_name[1:-1]
+            sur_name = f"{base_name}_sur"
+            split_name = f"{base_name}_split"
+            parts.append(f"[{base_name}]asplit=2[{sur_name}][{split_name}]")
             st_parts, st_label = _censored_stereo_filter(
-                f"[{split_label}]", f"cens{j}_st", stream
+                f"[{split_name}]", f"cens{j}_st", stream
             )
             parts.extend(st_parts)
             added_tracks.append({
-                "label": label,
+                "label": f"[{sur_name}]",
                 "stream": stream,
                 "title_base": track_title if not multi else f"{track_title} ({stream['layout']})",
                 "is_stereo_extra": False,
                 "default": track_counter == 0,
             })
-            # Replace the first added track's label with the split output
-            added_tracks[-2]["label"] = label
             added_tracks.append({
                 "label": st_label,
                 "stream": stream,
