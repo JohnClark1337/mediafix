@@ -33,6 +33,7 @@ from mediafix import downmix as downmix_mod
 from mediafix import srt as srt_mod
 from mediafix import subtitles as sub_mod
 from mediafix.probe import CENSOR_TRACK_TITLE, is_commentary_stream
+import audio_downmix as vendor_downmix
 
 _MODEL_BY_TIER = {"S": "small.en", "M": "medium.en"}
 _CENSOR_TMP_SUFFIX = ".bleeparr-tmp"
@@ -705,6 +706,26 @@ def _select_audio_targets(audio_streams, langs: str) -> list[dict]:
     return matched
 
 
+def _needs_downmix_censor(stream: dict) -> bool:
+    try:
+        return int(stream.get("channels") or 0) >= 6
+    except (TypeError, ValueError):
+        return False
+
+
+def _censored_stereo_filter(source_label: str, out_label: str,
+                            stream: dict) -> tuple[list[str], str]:
+    """Build a pan-downmix from a censored multi-channel stream to stereo."""
+    class _S:
+        def __init__(self, channels, layout):
+            self.channels = channels
+            self.layout = layout
+
+    s = _S(int(stream.get("channels") or 0), stream.get("layout") or "")
+    pan = vendor_downmix.build_pan(s)
+    return [f"[{source_label}]pan={pan}[{out_label}]"], f"[{out_label}]"
+
+
 def _build_censored_filtergraph(mute_points, pre_buffer_ms, post_buffer_ms, beep,
                                 src_label, out_label) -> tuple[list[str], str]:
     """Build a filtergraph that mutes (and optionally beeps over) *mute_points*."""
@@ -775,6 +796,8 @@ def add_censored_audio_track(input_file, mute_points, config,
 
     parts: list[str] = []
     labels: list[str] = []
+    added_tracks: list[dict] = []
+    track_counter = 0
     for j, stream in enumerate(targets):
         sub_parts, label = _build_censored_filtergraph(
             mute_points,
@@ -785,8 +808,26 @@ def add_censored_audio_track(input_file, mute_points, config,
             f"cens{j}",
         )
         parts.extend(sub_parts)
-        labels.append(label)
-    filter_complex = ";".join(parts)
+        added_tracks.append({
+            "label": label,
+            "stream": stream,
+            "title_base": track_title if not multi else f"{track_title} ({stream['layout']})",
+            "is_stereo_extra": False,
+            "default": track_counter == 0,
+        })
+        track_counter += 1
+        if _needs_downmix_censor(stream):
+            st_parts, st_label = _censored_stereo_filter(label, f"cens{j}_st", stream)
+            parts.extend(st_parts)
+            added_tracks.append({
+                "label": st_label,
+                "stream": stream,
+                "title_base": f"{track_title} (Stereo)",
+                "is_stereo_extra": True,
+                "default": track_counter == 0,
+            })
+            track_counter += 1
+    filter_complex = ";".join(parts) if parts else None
 
     tmp_out = os.path.join(
         os.path.dirname(os.path.abspath(input_file)),
@@ -795,24 +836,27 @@ def add_censored_audio_track(input_file, mute_points, config,
 
     cmd = [
         config.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-        "-i", str(input_file), "-filter_complex", filter_complex,
+        "-i", str(input_file),
     ]
+    if filter_complex:
+        cmd += ["-filter_complex", filter_complex]
     for stream in keep:
         cmd += ["-map", f"0:{stream['index']}"]
     cmd += ["-c:v", "copy", "-c:s", "copy", "-c:d", "copy", "-c:t", "copy"]
     n_audio = len(audio_streams)
     for i in range(n_audio):
         cmd += [f"-c:a:{i}", "copy", f"-disposition:a:{i}", "0"]
-    for j, stream in enumerate(targets):
-        idx = n_audio + j
-        title = track_title if not multi else f"{track_title} ({stream['layout']})"
-        bitrate = 384 if stream["channels"] >= 6 else 192
+    for k, track in enumerate(added_tracks):
+        idx = n_audio + k
+        stream = track["stream"]
+        title = track["title_base"]
+        bitrate = 192 if track["is_stereo_extra"] else (384 if stream["channels"] >= 6 else 192)
         cmd += [
-            "-map", labels[j],
+            "-map", track["label"],
             f"-c:a:{idx}", "aac", f"-b:a:{idx}", f"{bitrate}k",
             f"-metadata:s:a:{idx}", f"title={title}",
             f"-metadata:s:a:{idx}", f"language={stream['lang']}",
-            f"-disposition:a:{idx}", "default" if j == 0 else "0",
+            f"-disposition:a:{idx}", "default" if track["default"] else "0",
         ]
     cmd += ["-f", container, tmp_out]
 
@@ -842,7 +886,7 @@ def add_censored_audio_track(input_file, mute_points, config,
     _copy_mode(input_file, tmp_out)
     os.replace(tmp_out, str(input_file))
     message = (
-        f"added {len(targets)} censored track(s) over {len(mute_points)} segment(s)"
+        f"added {len(added_tracks)} censored track(s) over {len(mute_points)} segment(s)"
     )
     return True, message
 
