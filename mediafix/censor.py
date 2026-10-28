@@ -727,9 +727,12 @@ def _censored_stereo_filter(source_label: str, out_label: str,
             self.channels = channels
             self.layout = layout
 
+    src = source_label.strip()
+    if src.startswith("[") and src.endswith("]"):
+        src = src[1:-1]
     s = _S(int(stream.get("channels") or 0), stream.get("layout") or "")
     pan = vendor_downmix.build_pan(s)
-    return [f"[{source_label}]pan={pan}[{out_label}]"], f"[{out_label}]"
+    return [f"[{src}]pan={pan}[{out_label}]"], f"[{out_label}]"
 
 
 def _build_censored_filtergraph(mute_points, pre_buffer_ms, post_buffer_ms, beep,
@@ -805,12 +808,13 @@ def add_censored_audio_track(input_file, mute_points, config,
     added_tracks: list[dict] = []
     track_counter = 0
     for j, stream in enumerate(targets):
+        src_label = f"0:a:{stream['type_index']}"
         sub_parts, label = _build_censored_filtergraph(
             mute_points,
             config.pre_buffer_ms,
             config.post_buffer_ms,
             config.beep,
-            f"0:a:{stream['type_index']}",
+            src_label,
             f"cens{j}",
         )
         parts.extend(sub_parts)
