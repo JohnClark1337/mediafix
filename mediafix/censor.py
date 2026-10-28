@@ -626,11 +626,17 @@ def _run_ffmpeg(cmd_list, cancel: threading.Event | None = None):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+            out, err = process.communicate()
+            process.stdout_text = out or ""
+            process.stderr_text = err or ""
             return process, True
         try:
             process.wait(timeout=0.25)
         except subprocess.TimeoutExpired:
             continue
+    out, err = process.communicate()
+    process.stdout_text = out or ""
+    process.stderr_text = err or ""
     return process, False
 
 
@@ -872,13 +878,16 @@ def add_censored_audio_track(input_file, mute_points, config,
             os.remove(tmp_out)
         except OSError:
             pass
-        err = (process.stderr or "").lower()
-        if "no space left on device" in err:
+        err = getattr(process, "stderr_text", None) or ""
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", errors="replace")
+        err_low = (err or "").lower()
+        if "no space left on device" in err_low:
             raise CensorError(
                 "ffmpeg failed: no space left on device while writing output "
                 "(the copy needs ~1x the movie size on that drive)"
             )
-        raise CensorError(f"ffmpeg failed: {_tail(process.stderr)}")
+        raise CensorError(f"ffmpeg failed: {_tail(err)}")
 
     # The temp file is ffmpeg's, so it carries ffmpeg's mode. Copy the
     # original's permissions over before it replaces it, or the library ends
